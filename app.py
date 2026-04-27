@@ -101,11 +101,14 @@ def calc_summary(base_df, ob_df):
 # ═══════════════════════════════════════════
 # 파일3: Roster 교관 수당 파싱
 # ═══════════════════════════════════════════
-def classify_dest(to_val):
-    t = str(to_val).strip().upper()
-    if t in SET1_DEST:  return "1set"
-    if t in SET2_DEST:  return "2set"
-    if t in SET3P_DEST: return "3P"
+def classify_route(from_val, to_val):
+    """FROM 또는 TO 기준으로 Set 분류 (ICN 제외한 공항 기준)"""
+    for v in [from_val, to_val]:
+        v = str(v).strip().upper()
+        if v == 'ICN': continue
+        if v in SET1_DEST:  return "1set"
+        if v in SET2_DEST:  return "2set"
+        if v in SET3P_DEST: return "3P"
     return None
 
 def calc_instr_hrs(blhr_h, set_type):
@@ -125,41 +128,52 @@ def parse_roster_file(uploaded):
         crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
         if crew_name in INSTR_EXCL:
             continue  # 교관수당 제외 대상
-        next_idx  = name_indices[idx_i + 1]
-        hdr_rows  = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
+        next_idx = name_indices[idx_i + 1]
+        hdr_rows = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
         if len(hdr_rows) == 0: continue
         hdr_idx = hdr_rows[0]
         data = raw.iloc[hdr_idx+1:next_idx].copy()
         data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
                         "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
 
-        for _, row in data.iterrows():
-            dc = str(row["DC"]).strip() if not pd.isna(row["DC"]) else ""
-            if dc not in INSTR_DC:
-                continue
-            blhr_h = parse_hhmm(row["Blhr"])
-            if blhr_h == 0:
-                continue  # BH 없으면 무시
-            to_val   = str(row["To"]).strip() if not pd.isna(row["To"]) else ""
-            set_type = classify_dest(to_val)
-            if set_type is None:
-                continue  # 해당 목적지 아님 무시
-            instr_h  = calc_instr_hrs(blhr_h, set_type)
-            date_val = str(row["Date"]).strip() if not pd.isna(row["Date"]) else "-"
-            from_val = str(row["From"]).strip() if not pd.isna(row["From"]) else "-"
-            act_val  = str(row["Activity"]).strip() if not pd.isna(row["Activity"]) else "-"
+        # Pairing / Date forward fill
+        data["Pairing_ff"] = data["Pairing"].ffill()
+        data["Date_ff"]    = data["Date"].ffill()
+
+        # Blhr 있는 실제 비행편만
+        flights = data[data["Blhr"].notna() & ~data["Blhr"].isin(["Blhr","Total"])].copy()
+        flights["Blhr_h"] = flights["Blhr"].apply(parse_hhmm)
+        flights = flights[flights["Blhr_h"] > 0].copy()
+
+        # 교관 DC가 포함된 Pairing 목록 (R*, T* 제외 — INSTR_DC 기준)
+        pairing_has_instr = (
+            data[data["DC"].isin(INSTR_DC)]["Pairing_ff"].dropna().unique().tolist()
+        )
+
+        for _, row in flights.iterrows():
+            pairing = row["Pairing_ff"]
+            if pd.isna(pairing) or pairing not in pairing_has_instr:
+                continue  # 교관 Pairing 아님
+            from_val = str(row["From"]).strip() if not pd.isna(row["From"]) else ""
+            to_val   = str(row["To"]).strip()   if not pd.isna(row["To"])   else ""
+            set_type = classify_route(from_val, to_val)
+            if set_type is None: continue
+
+            blhr_h  = row["Blhr_h"]
+            instr_h = calc_instr_hrs(blhr_h, set_type)
+            dc_val  = str(row["DC"]).strip() if not pd.isna(row["DC"]) else "-"
 
             detail_rows.append({
-                "이름":      crew_name,
-                "날짜":      date_val,
-                "DC":        dc,
-                "편명":      act_val,
-                "From":      from_val,
-                "To":        to_val,
-                "Set구분":   set_type,
+                "이름":       crew_name,
+                "날짜":       str(row["Date_ff"]).strip(),
+                "DC":         dc_val,
+                "편명":       str(row["Activity"]).strip() if not pd.isna(row["Activity"]) else "-",
+                "From":       from_val,
+                "To":         to_val,
+                "Set구분":    set_type,
                 "Blhr(원본)": fmt_hhmm(blhr_h),
-                "Blhr_h":    blhr_h,
-                "교관시간_h": instr_h,
+                "Blhr_h":     blhr_h,
+                "교관시간_h":  instr_h,
                 "교관시간":   fmt_hhmm(instr_h),
             })
 
