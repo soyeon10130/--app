@@ -13,6 +13,7 @@ SET1_DEST  = {'DAD','BKK','HKG','NRT'}
 SET2_DEST  = {'DAC','LAX','EWR','SFO'}
 SET3P_DEST = {'HNL'}
 INSTR_DC   = {'LIP','LCP','DLCP','I','I*'}
+INSTR_EXCL = {'강용학','김문배','박충근','박형득','서세규'}  # 교관수당 제외 대상
 
 # ═══════════════════════════════════════════
 # 공통 유틸
@@ -122,6 +123,8 @@ def parse_roster_file(uploaded):
     detail_rows = []
     for idx_i, name_idx in enumerate(name_indices[:-1]):
         crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
+        if crew_name in INSTR_EXCL:
+            continue  # 교관수당 제외 대상
         next_idx  = name_indices[idx_i + 1]
         hdr_rows  = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
         if len(hdr_rows) == 0: continue
