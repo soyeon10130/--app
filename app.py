@@ -117,6 +117,11 @@ def calc_instr_hrs(blhr_h, set_type):
     if set_type == "3P":    return blhr_h / 3
     return 0.0
 
+def is_actual_flight(activity):
+    """YP로 시작하는 실제 비행편 여부"""
+    if pd.isna(activity): return False
+    return str(activity).strip().upper().startswith("YP")
+
 def parse_roster_file(uploaded):
     df = pd.read_excel(uploaded)
     raw = df.copy()
@@ -127,7 +132,7 @@ def parse_roster_file(uploaded):
     for idx_i, name_idx in enumerate(name_indices[:-1]):
         crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
         if crew_name in INSTR_EXCL:
-            continue  # 교관수당 제외 대상
+            continue
         next_idx = name_indices[idx_i + 1]
         hdr_rows = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
         if len(hdr_rows) == 0: continue
@@ -135,47 +140,53 @@ def parse_roster_file(uploaded):
         data = raw.iloc[hdr_idx+1:next_idx].copy()
         data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
                         "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
+        data = data.reset_index(drop=True)
 
         # Pairing / Date forward fill
         data["Pairing_ff"] = data["Pairing"].ffill()
         data["Date_ff"]    = data["Date"].ffill()
 
-        # Blhr 있는 실제 비행편만
-        flights = data[data["Blhr"].notna() & ~data["Blhr"].isin(["Blhr","Total"])].copy()
-        flights["Blhr_h"] = flights["Blhr"].apply(parse_hhmm)
-        flights = flights[flights["Blhr_h"] > 0].copy()
+        # Pairing명이 바뀌는 시점에만 새 그룹 부여 (연속 동일 Pairing = 하나의 운항)
+        data["group_id"] = (data["Pairing_ff"] != data["Pairing_ff"].shift(1)).cumsum()
 
-        # 교관 DC가 포함된 Pairing 목록 (R*, T* 제외 — INSTR_DC 기준)
-        pairing_has_instr = (
-            data[data["DC"].isin(INSTR_DC)]["Pairing_ff"].dropna().unique().tolist()
-        )
+        # Pairing_ff가 유효한 구간만 처리
+        first_valid = data["Pairing_ff"].first_valid_index()
+        if first_valid is None: continue
+        data = data[data.index >= first_valid]
 
-        for _, row in flights.iterrows():
-            pairing = row["Pairing_ff"]
-            if pd.isna(pairing) or pairing not in pairing_has_instr:
-                continue  # 교관 Pairing 아님
-            from_val = str(row["From"]).strip() if not pd.isna(row["From"]) else ""
-            to_val   = str(row["To"]).strip()   if not pd.isna(row["To"])   else ""
-            set_type = classify_route(from_val, to_val)
-            if set_type is None: continue
+        for gid, grp in data.groupby("group_id"):
+            if grp["Pairing_ff"].isna().all(): continue
+            # 이 운항 그룹에 교관 DC가 하나라도 있는지
+            if not grp["DC"].isin(INSTR_DC).any(): continue
 
-            blhr_h  = row["Blhr_h"]
-            instr_h = calc_instr_hrs(blhr_h, set_type)
-            dc_val  = str(row["DC"]).strip() if not pd.isna(row["DC"]) else "-"
+            # 실제 비행편(YP~) + Blhr > 0 인 행 모두 교관시간 인정
+            flights = grp[grp["Activity"].apply(is_actual_flight)].copy()
+            flights["Blhr_h"] = flights["Blhr"].apply(parse_hhmm)
+            flights = flights[flights["Blhr_h"] > 0]
 
-            detail_rows.append({
-                "이름":       crew_name,
-                "날짜":       str(row["Date_ff"]).strip(),
-                "DC":         dc_val,
-                "편명":       str(row["Activity"]).strip() if not pd.isna(row["Activity"]) else "-",
-                "From":       from_val,
-                "To":         to_val,
-                "Set구분":    set_type,
-                "Blhr(원본)": fmt_hhmm(blhr_h),
-                "Blhr_h":     blhr_h,
-                "교관시간_h":  instr_h,
-                "교관시간":   fmt_hhmm(instr_h),
-            })
+            for _, row in flights.iterrows():
+                from_val = str(row["From"]).strip() if not pd.isna(row["From"]) else ""
+                to_val   = str(row["To"]).strip()   if not pd.isna(row["To"])   else ""
+                set_type = classify_route(from_val, to_val)
+                if set_type is None: continue
+
+                blhr_h  = row["Blhr_h"]
+                instr_h = calc_instr_hrs(blhr_h, set_type)
+                dc_val  = str(row["DC"]).strip() if not pd.isna(row["DC"]) else "-"
+
+                detail_rows.append({
+                    "이름":       crew_name,
+                    "날짜":       str(row["Date_ff"]).strip(),
+                    "DC":         dc_val,
+                    "편명":       str(row["Activity"]).strip(),
+                    "From":       from_val,
+                    "To":         to_val,
+                    "Set구분":    set_type,
+                    "Blhr(원본)": fmt_hhmm(blhr_h),
+                    "Blhr_h":     blhr_h,
+                    "교관시간_h":  instr_h,
+                    "교관시간":   fmt_hhmm(instr_h),
+                })
 
     return pd.DataFrame(detail_rows)
 
