@@ -422,7 +422,7 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
 
     # ── 시트6: 교관 수당 상세 ────────────────
     ws6=wb.create_sheet("교관수당 상세")
-    hdrs6=["이름","날짜","DC","편명","From","To","Set구분","Blhr(원본)","교관시간","산출방식"]
+    hdrs6=["이름","날짜(KST)","DC","편명","From","To","Set구분","Blhr(원본)","교관시간","산출방식"]
     title_row(ws6,f"{label} 교관 비행 수당 상세",len(hdrs6))
     style_hdr(ws6,2,hdrs6)
     cur6=3; ci6=0; fills6=["FFFFFF","EDF4FF"]
@@ -436,7 +436,7 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
                 if st=="1set":   formula="BH × 1 (1set)"
                 elif st=="2set": formula="BH × 1/2 (2set)"
                 else:            formula="BH × 1/3 (3P)"
-                vals=[dr["이름"],dr["날짜"],dr["DC"],dr["편명"],dr["From"],dr["To"],
+                vals=[dr["이름"],dr["날짜(KST)"],dr["DC"],dr["편명"],dr["From"],dr["To"],
                       st,dr["Blhr(원본)"],dr["교관시간"],formula]
                 for col,val in enumerate(vals,1):
                     c=ws6.cell(row=cur6,column=col,value=val); c.font=cf; c.fill=rf; c.border=bd
@@ -585,7 +585,7 @@ if all_uploaded:
                         nl2=["전체"]+sorted(instr_det["이름"].unique().tolist())
                         sn2=st.selectbox("교관 선택",nl2,key="instr_sel")
                         vw2=instr_det if sn2=="전체" else instr_det[instr_det["이름"]==sn2]
-                        d6=vw2[["이름","날짜","DC","편명","From","To","Set구분","Blhr(원본)","교관시간"]].copy()
+                        d6=vw2[["이름","날짜(KST)","DC","편명","From","To","Set구분","Blhr(원본)","교관시간"]].copy()
                         d6.index+=1
                         st.dataframe(d6,use_container_width=True,height=400)
                         if sn2!="전체":
