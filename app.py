@@ -101,6 +101,11 @@ def calc_summary(base_df, ob_df):
 # ═══════════════════════════════════════════
 # 파일3: Roster 교관 수당 파싱
 # ═══════════════════════════════════════════
+AIRPORT_UTC = {
+    'ICN': 9, 'NRT': 9, 'HKG': 8, 'BKK': 7, 'DAD': 7,
+    'LAX': -8, 'EWR': -5, 'SFO': -8, 'DAC': 6, 'HNL': -10,
+}
+
 def classify_route(from_val, to_val):
     """FROM 또는 TO 기준으로 Set 분류 (ICN 제외한 공항 기준)"""
     for v in [from_val, to_val]:
@@ -110,6 +115,26 @@ def classify_route(from_val, to_val):
         if v in SET2_DEST:  return "2set"
         if v in SET3P_DEST: return "3P"
     return None
+
+def local_to_kst(date_str, time_str, from_city):
+    """현지 출발시간 → KST datetime (공항별 UTC 오프셋 적용)"""
+    try:
+        base = datetime.datetime.strptime(str(date_str).strip(), "%d%b%y")
+    except:
+        return None
+    s = str(time_str).strip() if not pd.isna(time_str) else ""
+    if not s or s == "nan":
+        return datetime.datetime(base.year, base.month, base.day, 0, 0)
+    next_day = "+1" in s
+    s_clean = s.replace("+1", "").strip()
+    try:
+        h = int(s_clean[:2]); m = int(s_clean[2:4])
+    except:
+        return datetime.datetime(base.year, base.month, base.day, 0, 0)
+    local_dt = datetime.datetime(base.year, base.month, base.day, h, m)
+    if next_day: local_dt += timedelta(days=1)
+    offset = AIRPORT_UTC.get(str(from_city).strip().upper(), 9)
+    return local_dt + timedelta(hours=(9 - offset))
 
 def calc_instr_hrs(blhr_h, set_type):
     if set_type == "1set":  return blhr_h
@@ -122,7 +147,7 @@ def is_actual_flight(activity):
     if pd.isna(activity): return False
     return str(activity).strip().upper().startswith("YP")
 
-def parse_roster_file(uploaded):
+def parse_roster_file(uploaded, target_month=None, target_year=None):
     df = pd.read_excel(uploaded)
     raw = df.copy()
     name_indices = raw[raw.iloc[:,0].astype(str).str.match(r'^[가-힣]{2,5}:$', na=False)].index.tolist()
@@ -141,25 +166,19 @@ def parse_roster_file(uploaded):
         data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
                         "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
         data = data.reset_index(drop=True)
-
-        # Pairing / Date forward fill
         data["Pairing_ff"] = data["Pairing"].ffill()
         data["Date_ff"]    = data["Date"].ffill()
 
-        # Pairing명이 바뀌는 시점에만 새 그룹 부여 (연속 동일 Pairing = 하나의 운항)
-        data["group_id"] = (data["Pairing_ff"] != data["Pairing_ff"].shift(1)).cumsum()
-
-        # Pairing_ff가 유효한 구간만 처리
+        # ★ raw Pairing 열에 값이 등장할 때마다 새 그룹 (운항 단위 정확 분리)
+        data["group_id"] = data["Pairing"].notna().cumsum()
         first_valid = data["Pairing_ff"].first_valid_index()
         if first_valid is None: continue
-        data = data[data.index >= first_valid]
+        data = data[(data.index >= first_valid) & (data["group_id"] > 0)]
 
         for gid, grp in data.groupby("group_id"):
             if grp["Pairing_ff"].isna().all(): continue
-            # 이 운항 그룹에 교관 DC가 하나라도 있는지
             if not grp["DC"].isin(INSTR_DC).any(): continue
 
-            # 실제 비행편(YP~) + Blhr > 0 인 행 모두 교관시간 인정
             flights = grp[grp["Activity"].apply(is_actual_flight)].copy()
             flights["Blhr_h"] = flights["Blhr"].apply(parse_hhmm)
             flights = flights[flights["Blhr_h"] > 0]
@@ -170,13 +189,20 @@ def parse_roster_file(uploaded):
                 set_type = classify_route(from_val, to_val)
                 if set_type is None: continue
 
+                # ★ 공항별 UTC 오프셋으로 KST 출발 시각 계산 → 월 귀속 판단
+                kst_dt = local_to_kst(row["Date_ff"], row["Start_L"], from_val)
+                if kst_dt is None: continue
+                if target_month and target_year:
+                    if kst_dt.month != target_month or kst_dt.year != target_year:
+                        continue
+
                 blhr_h  = row["Blhr_h"]
                 instr_h = calc_instr_hrs(blhr_h, set_type)
                 dc_val  = str(row["DC"]).strip() if not pd.isna(row["DC"]) else "-"
 
                 detail_rows.append({
                     "이름":       crew_name,
-                    "날짜":       str(row["Date_ff"]).strip(),
+                    "날짜(KST)":  kst_dt.strftime("%m/%d"),
                     "DC":         dc_val,
                     "편명":       str(row["Activity"]).strip(),
                     "From":       from_val,
@@ -462,7 +488,7 @@ if all_uploaded:
         base_df   = parse_dhc_file(dhc_file)
         ob_df     = parse_obca_file(ob_file)
         calc_df   = calc_summary(base_df, ob_df)
-        instr_det = parse_roster_file(rost_file)
+        instr_det = parse_roster_file(rost_file)  # 월 필터는 정산 실행 시 적용
 
         n_instr = instr_det["이름"].nunique() if not instr_det.empty else 0
         st.success(f"✅ 4개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명")
@@ -488,6 +514,7 @@ if all_uploaded:
         if st.button("🚀 정산 실행", type="primary", use_container_width=True):
             with st.spinner("계산 중..."):
                 flt_sum, flt_det = process_flt(flt_df, target_month, target_year)
+                instr_det = parse_roster_file(rost_file, target_month, target_year)
 
             if flt_sum.empty:
                 st.warning("FltReport에서 해당 월 데이터가 없습니다.")
