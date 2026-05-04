@@ -260,7 +260,19 @@ def process_flt(df, target_month, target_year):
         if ata_kst and ata_kst < atd_kst: ata_kst += timedelta(days=1)
         if co_kst and ci_kst and co_kst < ci_kst: co_kst += timedelta(days=1)
         if atd_kst.month!=target_month or atd_kst.year!=target_year: continue
-        flight=str(row["Flight"]); bl=blhrs_decimal(row["Bl Hrs"])
+
+        # ── 3P 버그 수정: 편명이 숫자형으로 읽힐 경우 "0151" 형태로 정규화 ──
+        flight_raw = row["Flight"]
+        try:
+            flight = str(int(float(flight_raw))).zfill(4) if pd.notna(flight_raw) else ""
+        except (ValueError, TypeError):
+            flight = str(flight_raw).strip()
+
+        # ── Bl Hrs 버그 수정: time 타입 파싱 실패 시 parse_hhmm으로 fallback ──
+        bl = blhrs_decimal(row["Bl Hrs"])
+        if bl == 0.0:
+            bl = parse_hhmm(row["Bl Hrs"])
+
         night=calc_night(ci_kst,co_kst); ot=calc_ot(atd_kst,ata_kst)
         p3=bl if flight in ["0151","0152"] else 0.0
         route=f"{row['From']}→{row['To']}"
