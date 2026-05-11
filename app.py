@@ -589,11 +589,12 @@ c1,c2 = st.columns(2)
 with c1:
     flt_file  = st.file_uploader("📂 FltReport.xlsx", type=["xlsx"])
     dhc_file  = st.file_uploader("📂 월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"])
-with c2:
     ob_file   = st.file_uploader("📂 OBCA.xlsx", type=["xlsx"])
+with c2:
     rost_file = st.file_uploader("📂 Roster.xlsx (교관수당)", type=["xlsx"])
+    dh_rost_file = st.file_uploader("📂 Roster.xlsx (DHC — DH자동감지)", type=["xlsx"])
 
-all_uploaded = flt_file and dhc_file and ob_file and rost_file
+all_uploaded = flt_file and dhc_file and ob_file and rost_file and dh_rost_file
 
 if all_uploaded:
     try:
@@ -609,12 +610,12 @@ if all_uploaded:
         ob_df     = parse_obca_file(ob_file)
         calc_df   = calc_summary(base_df, ob_df)
         instr_det = parse_roster_file(rost_file)  # 월 필터는 정산 실행 시 적용
-        dh_exclude = parse_roster_dh_exclude(rost_file)  # DH 탑승자 자동 추출
+        dh_exclude = parse_roster_dh_exclude(dh_rost_file)  # DHC Roster에서 DH 탑승자 자동 추출
 
         n_instr = instr_det["이름"].nunique() if not instr_det.empty else 0
         n_dh_pairs = len(dh_exclude)
         dh_names_all = set(n for names in dh_exclude.values() for n in names)
-        st.success(f"✅ 4개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH제외 {len(dh_names_all)}명({n_dh_pairs}건)")
+        st.success(f"✅ 5개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH제외 {len(dh_names_all)}명({n_dh_pairs}건)")
 
         selected_str=st.selectbox("📅 정산할 월 선택",[str(p) for p in available])
         sel=pd.Period(selected_str,freq="M"); target_year,target_month=sel.year,sel.month
@@ -736,8 +737,9 @@ if all_uploaded:
         st.error(f"오류 발생: {e}"); st.exception(e)
 else:
     missing=[]
-    if not flt_file:  missing.append("FltReport.xlsx")
-    if not dhc_file:  missing.append("월DHC_DAYOFF_총비행시간.xlsx")
-    if not ob_file:   missing.append("OBCA.xlsx")
-    if not rost_file: missing.append("Roster.xlsx")
+    if not flt_file:      missing.append("FltReport.xlsx")
+    if not dhc_file:      missing.append("월DHC_DAYOFF_총비행시간.xlsx")
+    if not ob_file:       missing.append("OBCA.xlsx")
+    if not rost_file:     missing.append("Roster.xlsx (교관수당)")
+    if not dh_rost_file:  missing.append("Roster.xlsx (DHC — DH자동감지)")
     st.info(f"아래 파일을 모두 업로드해주세요: {' · '.join(missing)}")
