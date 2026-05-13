@@ -181,13 +181,15 @@ def local_to_kst(date_str, time_str, from_city):
     if not s or s == "nan":
         return datetime.datetime(base.year, base.month, base.day, 0, 0)
     next_day = "+1" in s
-    s_clean = s.replace("+1", "").strip()
+    prev_day = "-1" in s
+    s_clean = s.replace("+1", "").replace("-1", "").strip()
     try:
         h = int(s_clean[:2]); m = int(s_clean[2:4])
     except:
         return datetime.datetime(base.year, base.month, base.day, 0, 0)
     local_dt = datetime.datetime(base.year, base.month, base.day, h, m)
     if next_day: local_dt += timedelta(days=1)
+    if prev_day: local_dt -= timedelta(days=1)
     offset = AIRPORT_UTC.get(str(from_city).strip().upper(), 9)
     return local_dt + timedelta(hours=(9 - offset))
 
