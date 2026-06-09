@@ -586,143 +586,31 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
 # ═══════════════════════════════════════════
 # Streamlit UI
 # ═══════════════════════════════════════════
-st.set_page_config(page_title="운항 수당 정산기", page_icon="✈️", layout="wide")
+st.set_page_config(page_title="운항 수당 정산기", page_icon="✈️", layout="centered")
+st.title("✈️ 운항 수당 정산기")
+st.caption("4개 파일 업로드 → 월 선택 → 정산 실행 → 엑셀 다운로드 (시트 6개)")
+st.divider()
 
-# ─── Air Premia 브랜드 스타일 주입 ───────────
-st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" rel="stylesheet">
-<style>
-:root{
-  --ap-navy:#1B2A4A; --ap-coral:#E8512A; --ap-white:#FFFFFF;
-  --ap-light:#F5F5F5; --ap-mid:#CCCCCC; --ap-text:#333333;
-}
-html, body, [class*="css"]{
-  font-family:'Pretendard','Noto Sans KR',sans-serif;
-  color:var(--ap-text);
-}
-.block-container{max-width:1080px; padding-top:1.4rem;}
-
-/* 상단 히어로 헤더 */
-.ap-hero{
-  background:var(--ap-navy); border-radius:16px;
-  padding:30px 36px; margin-bottom:26px;
-  display:flex; align-items:center; gap:18px;
-}
-.ap-hero .dot{
-  width:14px; height:14px; border-radius:50%;
-  background:var(--ap-coral); flex:0 0 auto; margin-top:4px;
-}
-.ap-hero h1{
-  font-family:'Montserrat','Pretendard',sans-serif;
-  color:var(--ap-white); font-size:30px; font-weight:700;
-  margin:0; line-height:1.15;
-}
-.ap-hero p{
-  color:#B7C0D4; font-size:13.5px; margin:6px 0 0 0; font-weight:400;
-}
-
-/* 섹션 라벨 */
-.ap-seclabel{
-  font-family:'Montserrat',sans-serif; font-size:12px; font-weight:600;
-  letter-spacing:0.10em; text-transform:uppercase;
-  color:var(--ap-coral); margin:6px 0 14px 2px;
-}
-
-/* 업로드 카드 헤더 */
-.ap-uphead{
-  display:flex; align-items:baseline; gap:8px; margin:4px 0 2px 0;
-}
-.ap-uphead .name{
-  font-weight:700; font-size:15px; color:var(--ap-navy);
-}
-.ap-uphead .tag{
-  font-size:10.5px; font-weight:600; letter-spacing:0.04em;
-  color:var(--ap-coral); background:rgba(232,81,42,0.10);
-  padding:1px 7px; border-radius:20px;
-}
-.ap-updesc{
-  font-size:12px; color:#6B7280; line-height:1.55;
-  margin:0 0 8px 2px;
-}
-
-/* 파일 업로더 박스 */
-[data-testid="stFileUploader"]{
-  background:var(--ap-light); border:1.5px dashed var(--ap-mid);
-  border-radius:12px; padding:6px 12px; transition:all .2s ease;
-}
-[data-testid="stFileUploader"]:hover{
-  border-color:var(--ap-coral); background:#FBFBFC;
-}
-[data-testid="stFileUploader"] section{padding:0;}
-
-/* 기본 버튼 = 코랄 */
-.stButton>button, .stDownloadButton>button{
-  background:var(--ap-coral)!important; color:#fff!important;
-  border:none!important; border-radius:6px!important;
-  font-family:'Montserrat',sans-serif!important; font-weight:600!important;
-  letter-spacing:0.03em!important; transition:all .2s ease!important;
-}
-.stButton>button:hover, .stDownloadButton>button:hover{
-  background:#d44420!important; transform:translateY(-1px);
-}
-
-/* 탭 */
-.stTabs [data-baseweb="tab-list"]{gap:4px;}
-.stTabs [data-baseweb="tab"]{
-  font-weight:600; color:#6B7280; border-radius:8px 8px 0 0;
-}
-.stTabs [aria-selected="true"]{
-  color:var(--ap-navy)!important;
-  border-bottom:3px solid var(--ap-coral)!important;
-}
-
-/* metric 강조 */
-[data-testid="stMetricValue"]{color:var(--ap-navy); font-weight:700;}
-
-/* selectbox 라벨 */
-.stSelectbox label{font-weight:600; color:var(--ap-navy);}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="ap-hero">
-  <span class="dot"></span>
-  <div>
-    <h1>운항 수당 정산기</h1>
-    <p>파일 5개 업로드 → 월 선택 → 정산 실행 → 엑셀 다운로드 (시트 6개)</p>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-def up_card(name, tag, desc):
-    st.markdown(f"""
-    <div class="ap-uphead"><span class="name">{name}</span><span class="tag">{tag}</span></div>
-    <div class="ap-updesc">{desc}</div>
-    """, unsafe_allow_html=True)
-
-st.markdown('<div class="ap-seclabel">파일 업로드</div>', unsafe_allow_html=True)
-
-c1,c2 = st.columns(2, gap="large")
+c1,c2 = st.columns(2)
 with c1:
-    up_card("FltReport", "메일 수신",
-            "매월 2일 오전 9:30 메일 수신<br>발송처 <b>yp-report@airpremia.com</b> · 제목 <b>PDC_FLT_Report</b>")
+    st.markdown("**📂 FltReport.xlsx**")
+    st.caption("매월 2일 오전 9:30 메일 수신 · 발송처: yp-report@airpremia.com · 제목: PDC_FLT_Report")
     flt_file  = st.file_uploader("FltReport.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_flt")
 
-    up_card("월DHC · DAYOFF · 총비행시간", "PDC 추출",
-            "PDC → Reports → Counter report → Period 설정 → All in FD<br>→ Counter에 <b>Block · Day off · DHC</b> 선택 → 추출")
+    st.markdown("**📂 월DHC_DAYOFF_총비행시간.xlsx**")
+    st.caption("PDC → Reports → Counter report → Period 설정 → All in FD → Counter에 Block · Day off · DHC 선택 → 추출")
     dhc_file  = st.file_uploader("월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
 
-    up_card("OBCA", "PDC 추출",
-            "PDC → Experience → Period 설정 → All in FD → 추출")
+    st.markdown("**📂 OBCA.xlsx**")
+    st.caption("PDC → Experience → Period 설정 → All in FD → 추출")
     ob_file   = st.file_uploader("OBCA.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_ob")
 with c2:
-    up_card("Roster (교관수당)", "PDC 추출",
-            "PDC → Crew roster → Period 설정 → Position <b>(LIP·LCP·DLCP)</b> 선택<br>→ Section <b>(Schedule)</b> 선택 → Time mode <b>(Basetime)</b> → 추출")
+    st.markdown("**📂 Roster.xlsx (교관수당)**")
+    st.caption("PDC → Crew roster → Period 설정 → Position(LIP·LCP·DLCP) 선택 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
     rost_file = st.file_uploader("Roster.xlsx (교관수당)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
 
-    up_card("Roster (DHC — DH 자동감지)", "PDC 추출",
-            "PDC → Crew roster → Position <b>(All in FD)</b> → Period 설정<br>→ Section <b>(Schedule)</b> 선택 → Time mode <b>(Basetime)</b> → 추출")
+    st.markdown("**📂 Roster.xlsx (DHC — DH자동감지)**")
+    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
     dh_rost_file = st.file_uploader("Roster.xlsx (DHC — DH자동감지)", type=["xlsx"], label_visibility="collapsed", key="up_dhrost")
 
 all_uploaded = flt_file and dhc_file and ob_file and rost_file and dh_rost_file
@@ -748,8 +636,7 @@ if all_uploaded:
         dh_names_all = set(n for names in dh_exclude.values() for n in names)
         st.success(f"✅ 5개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH제외 {len(dh_names_all)}명({n_dh_pairs}건)")
 
-        st.markdown('<div class="ap-seclabel">정산 월 선택</div>', unsafe_allow_html=True)
-        selected_str=st.selectbox("정산할 월 선택",[str(p) for p in available],label_visibility="collapsed")
+        selected_str=st.selectbox("📅 정산할 월 선택",[str(p) for p in available])
         sel=pd.Period(selected_str,freq="M"); target_year,target_month=sel.year,sel.month
 
         with st.expander("ℹ️ 계산 기준 보기"):
