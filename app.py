@@ -593,12 +593,25 @@ st.divider()
 
 c1,c2 = st.columns(2)
 with c1:
-    flt_file  = st.file_uploader("📂 FltReport.xlsx", type=["xlsx"])
-    dhc_file  = st.file_uploader("📂 월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"])
-    ob_file   = st.file_uploader("📂 OBCA.xlsx", type=["xlsx"])
+    st.markdown("**📂 FltReport.xlsx**")
+    st.caption("매월 2일 오전 9:30 메일 수신 · 발송처: yp-report@airpremia.com · 제목: PDC_FLT_Report")
+    flt_file  = st.file_uploader("FltReport.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_flt")
+
+    st.markdown("**📂 월DHC_DAYOFF_총비행시간.xlsx**")
+    st.caption("PDC → Reports → Counter report → Period 설정 → All in FD → Counter에 Block · Day off · DHC 선택 → 추출")
+    dhc_file  = st.file_uploader("월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
+
+    st.markdown("**📂 OBCA.xlsx**")
+    st.caption("PDC → Experience → Period 설정 → All in FD → 추출")
+    ob_file   = st.file_uploader("OBCA.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_ob")
 with c2:
-    rost_file = st.file_uploader("📂 Roster.xlsx (교관수당)", type=["xlsx"])
-    dh_rost_file = st.file_uploader("📂 Roster.xlsx (DHC — DH자동감지)", type=["xlsx"])
+    st.markdown("**📂 Roster.xlsx (교관수당)**")
+    st.caption("PDC → Crew roster → Period 설정 → Position(LIP·LCP·DLCP) 선택 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
+    rost_file = st.file_uploader("Roster.xlsx (교관수당)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
+
+    st.markdown("**📂 Roster.xlsx (DHC — DH자동감지)**")
+    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
+    dh_rost_file = st.file_uploader("Roster.xlsx (DHC — DH자동감지)", type=["xlsx"], label_visibility="collapsed", key="up_dhrost")
 
 all_uploaded = flt_file and dhc_file and ob_file and rost_file and dh_rost_file
 
