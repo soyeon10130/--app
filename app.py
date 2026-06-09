@@ -85,7 +85,7 @@ def parse_roster_dh_exclude(uploaded):
             continue
         hdr_idx = hdr_rows[0]
         data = raw.iloc[hdr_idx+1:next_idx].copy()
-data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
+        data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
                 "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
         data = data.reset_index(drop=True)
         data["Date_ff"] = data["Date"].ffill()
