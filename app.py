@@ -278,7 +278,19 @@ def parse_roster_file(uploaded, target_month=None, target_year=None):
 # ═══════════════════════════════════════════
 def combine_dt(date_str, t):
     if pd.isna(t) or t is None: return None
-    base = datetime.datetime.strptime(date_str, "%d%b%y")
+    # datetime/Timestamp 객체면 바로 사용, 문자열이면 파싱
+    if isinstance(date_str, (datetime.datetime, pd.Timestamp)):
+        base = date_str
+    else:
+        s = str(date_str).strip()
+        for fmt in ("%d%b%y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                base = datetime.datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
     return datetime.datetime(base.year, base.month, base.day, t.hour, t.minute, t.second)
 
 def calc_night(ci, co):
@@ -306,7 +318,12 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
         crew_str = row["운항 Crew"]
         if pd.isna(crew_str): continue
 
-        date_str = str(row["Date"]).strip()
+        # Date 컬럼이 datetime 객체로 읽힐 수도 있으므로 두 형식 모두 처리
+        raw_date = row["Date"]
+        if isinstance(raw_date, (datetime.datetime, pd.Timestamp)):
+            date_str = raw_date.strftime("%d%b%y").upper()
+        else:
+            date_str = str(raw_date).strip()
 
         # 편명 정규화 (숫자형 방어)
         try:
