@@ -86,7 +86,7 @@ def parse_roster_dh_exclude(uploaded):
         hdr_idx = hdr_rows[0]
         data = raw.iloc[hdr_idx+1:next_idx].copy()
         data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
-                "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
+                        "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
         data = data.reset_index(drop=True)
         data["Date_ff"] = data["Date"].ffill()
         data["Pairing_ff"] = data["Pairing"].ffill()
@@ -329,26 +329,16 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
         if ata_kst and ata_kst < atd_kst: ata_kst += timedelta(days=1)
         if co_kst and ci_kst and co_kst < ci_kst: co_kst += timedelta(days=1)
 
-        # ─────────────────────────────────────────────────────────────
-        # ★ 월 귀속 판단
-        #   연장·3P : ATD KST 기준 (기존 유지)
-        #   야간     : CI  KST 기준 (수정 — CI가 없으면 ATD로 fallback)
-        # ─────────────────────────────────────────────────────────────
         night_ref_kst = ci_kst if ci_kst else atd_kst   # 야간 귀속 기준 시각
 
-        # ATD 기준 월 귀속 체크 (연장·3P)
         if atd_kst.month != target_month or atd_kst.year != target_year:
-            # ATD가 대상 월이 아니어도 야간 귀속(CI) 기준으로 포함 가능
-            # → 야간만 계산할 수 있도록 atd_in_month 플래그 사용
             atd_in_month = False
         else:
             atd_in_month = True
 
-        # CI 기준 월 귀속 체크 (야간)
         night_in_month = (night_ref_kst.month == target_month and
                           night_ref_kst.year  == target_year)
 
-        # 야간도, 연장·3P도 해당 월이 아니면 완전히 스킵
         if not atd_in_month and not night_in_month:
             continue
 
@@ -357,24 +347,21 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
         ot    = calc_ot(atd_kst, ata_kst) if atd_in_month else 0.0
         p3    = (bl if flight in ["0151", "0152"] else 0.0) if atd_in_month else 0.0
 
-        # 야간이 대상 월이 아니면 0으로
         if not night_in_month:
             night = 0.0
 
-        # 야간·연장·3P 모두 0이면 기록 불필요
         if night == 0 and ot == 0 and p3 == 0:
             continue
 
         route = f"{row['From']}→{row['To']}"
 
-        # ★ DH 탑승자 제외: Roster에서 자동 추출한 dh_exclude 테이블 참조
-        dh_key = (date_str, flight.lstrip("0") or "0")   # "0131" → "131"
+        dh_key = (date_str, flight.lstrip("0") or "0")
         excluded_names = (dh_exclude or {}).get(dh_key, set())
 
         for name in str(crew_str).split():
             name = name.strip()
             if not name: continue
-            if name in excluded_names: continue   # ★ DH 탑승자 건너뜀
+            if name in excluded_names: continue
 
             sum_rows.append({"이름": name, "night": night, "ot": ot, "p3": p3})
             det_rows.append({
