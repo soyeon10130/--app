@@ -130,95 +130,6 @@ def parse_dhc_file(uploaded):
     dhc.columns=["Crew Code","DHC"]; dhc["DHC"]=dhc["DHC"].apply(parse_hhmm)
     return block.merge(dayoff, on="Crew Code").merge(dhc, on="Crew Code")
 
-def normalize_date_key(val):
-    if pd.isna(val):
-        return ""
-    if isinstance(val, (datetime.datetime, pd.Timestamp)):
-        return val.strftime("%d%b%y").upper()
-    s = str(val).strip()
-    for fmt in ("%d%b%y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.datetime.strptime(s, fmt).strftime("%d%b%y").upper()
-        except ValueError:
-            continue
-    return s.upper()
-
-def normalize_flight_no(activity):
-    m = re.search(r'\d+', str(activity).strip())
-    if not m:
-        return ""
-    return str(int(m.group())).lstrip("0") or "0"
-
-def parse_integrated_roster_file(uploaded, target_month=None, target_year=None):
-    """
-    Crew Roster(All in FD) 파일 하나에서 총비행시간 기초자료, DH 제외, OBCA/OBFO 제외를 추출.
-    반환: (base_df, dh_exclude, ob_exclude)
-    """
-    raw = pd.read_excel(uploaded, header=None)
-    name_indices = raw[raw.iloc[:,0].astype(str).str.match(r'^[가-힣A-Za-z0-9]+:$', na=False)].index.tolist()
-    name_indices.append(len(raw))
-
-    base_rows = []
-    dh_exclude = {}
-    ob_exclude = {}
-
-    for idx_i, name_idx in enumerate(name_indices[:-1]):
-        crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
-        next_idx = name_indices[idx_i + 1]
-        hdr_rows = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
-        if len(hdr_rows) == 0:
-            continue
-
-        hdr_idx = hdr_rows[0]
-        block_h = parse_hhmm(raw.iloc[name_idx, 13] if raw.shape[1] > 13 else 0)
-        data = raw.iloc[hdr_idx+1:next_idx].copy()
-        data.columns = ["Date","Pairing","DC","Pos","CI_L","CO_L","Activity",
-                        "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
-        data = data.reset_index(drop=True)
-        data["Date_ff"] = data["Date"].ffill()
-
-        if target_month and target_year:
-            date_dt = pd.to_datetime(data["Date_ff"], format="%d%b%y", errors="coerce")
-            data = data[(date_dt.dt.month == target_month) & (date_dt.dt.year == target_year)]
-
-        dayoff = int((data["Activity"].astype(str).str.strip().str.upper() == "OFF").sum())
-        dhc_h = 0.0
-        ob_h = 0.0
-
-        for _, row in data.iterrows():
-            activity = str(row["Activity"]).strip()
-            flight_no = normalize_flight_no(activity)
-            if not flight_no:
-                continue
-
-            date_key = normalize_date_key(row["Date_ff"])
-            dc_val = str(row["DC"]).strip().upper() if not pd.isna(row["DC"]) else ""
-            pos_val = str(row["Pos"]).strip().upper() if not pd.isna(row["Pos"]) else ""
-            blhr_h = parse_hhmm(row["Blhr"])
-            bh_h = parse_hhmm(row["BH"])
-            leg_h = blhr_h if blhr_h else bh_h
-
-            if dc_val == "DH":
-                dhc_h += leg_h
-                dh_exclude.setdefault((date_key, flight_no), set()).add(crew_name)
-
-            if pos_val in {"OBFO", "OBCA"}:
-                ob_h += leg_h
-                ob_exclude.setdefault((date_key, flight_no), set()).add(crew_name)
-
-        base_rows.append({
-            "Crew Code": crew_name,
-            "Block": block_h,
-            "Dayoff": dayoff,
-            "DHC": dhc_h,
-            "OBCA_OBFO": ob_h,
-        })
-
-    base_df = pd.DataFrame(base_rows)
-    if base_df.empty:
-        base_df = pd.DataFrame(columns=["Crew Code","Block","Dayoff","DHC","OBCA_OBFO"])
-    return base_df, dh_exclude, ob_exclude
-
 # ═══════════════════════════════════════════
 # 파일2: OBCA / OBFO 파싱
 # ═══════════════════════════════════════════
@@ -234,12 +145,8 @@ def parse_obca_file(uploaded):
     ob_sum.columns=["Crew Code","OBCA_OBFO"]
     return ob_sum
 
-def calc_summary(base_df, ob_df=None):
-    df = base_df.copy()
-    if ob_df is not None:
-        df = df.merge(ob_df, on="Crew Code", how="left")
-    if "OBCA_OBFO" not in df.columns:
-        df["OBCA_OBFO"] = 0
+def calc_summary(base_df, ob_df):
+    df = base_df.merge(ob_df, on="Crew Code", how="left")
     df["OBCA_OBFO"] = df["OBCA_OBFO"].fillna(0)
     df["DHC_50"]    = df["DHC"] * 0.5
     df["Total_Flt"] = (df["Block"] + df["DHC_50"] - df["OBCA_OBFO"]).clip(lower=0)
@@ -428,7 +335,7 @@ def adjust_ci_co_dates(atd_utc, ci_utc, co_utc):
         co_utc += timedelta(days=1)
     return ci_utc, co_utc
 
-def process_flt(df, target_month, target_year, dh_exclude=None, ob_exclude=None):
+def process_flt(df, target_month, target_year, dh_exclude=None):
     sum_rows, det_rows = [], []
     grouped = {}
 
@@ -533,13 +440,11 @@ def process_flt(df, target_month, target_year, dh_exclude=None, ob_exclude=None)
         route = " + ".join(g["routes"])
         dh_key = (date_str, flight.lstrip("0") or "0")
         excluded_names = (dh_exclude or {}).get(dh_key, set())
-        ob_names = (ob_exclude or {}).get(dh_key, set())
 
         for name in g["crew_str"].split():
             name = name.strip()
             if not name: continue
             if name in excluded_names: continue
-            if name in ob_names: continue
 
             sum_rows.append({"이름": name, "night": night, "ot": ot, "p3": p3})
             det_rows.append({
@@ -749,7 +654,7 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
 # ═══════════════════════════════════════════
 st.set_page_config(page_title="운항 수당 정산기", page_icon="✈️", layout="centered")
 st.title("✈️ 운항 수당 정산기")
-st.caption("3개 파일 업로드 → 월 선택 → 정산 실행 → 엑셀 다운로드 (시트 6개)")
+st.caption("4개 파일 업로드 → 월 선택 → 정산 실행 → 엑셀 다운로드 (시트 6개)")
 st.divider()
 
 c1,c2 = st.columns(2)
@@ -758,15 +663,23 @@ with c1:
     st.caption("매월 2일 오전 9:30 메일 수신 · 발송처: yp-report@airpremia.com · 제목: PDC_FLT_Report")
     flt_file  = st.file_uploader("FltReport.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_flt")
 
-    st.markdown("**📂 Crew Roster.xlsx (총비행시간·DAYOFF·DH·OBCA/OBFO)**")
-    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Section(Schedule) 선택 → Time mode(UTC Time) → 추출")
-    dhc_file  = st.file_uploader("Crew Roster.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
+    st.markdown("**📂 월DHC_DAYOFF_총비행시간.xlsx**")
+    st.caption("PDC → Reports → Counter report → Period 설정 → All in FD → Counter에 Block · Day off · DHC 선택 → 추출")
+    dhc_file  = st.file_uploader("월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
+
+    st.markdown("**📂 OBCA.xlsx**")
+    st.caption("PDC → Experience → Period 설정 → All in FD → 추출")
+    ob_file   = st.file_uploader("OBCA.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_ob")
 with c2:
     st.markdown("**📂 Roster.xlsx (교관수당)**")
     st.caption("PDC → Crew roster → Period 설정 → Position(LIP·LCP·DLCP) 선택 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
     rost_file = st.file_uploader("Roster.xlsx (교관수당)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
 
-all_uploaded = flt_file and dhc_file and rost_file
+    st.markdown("**📂 Roster.xlsx (DHC — DH자동감지)**")
+    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
+    dh_rost_file = st.file_uploader("Roster.xlsx (DHC — DH자동감지)", type=["xlsx"], label_visibility="collapsed", key="up_dhrost")
+
+all_uploaded = flt_file and dhc_file and ob_file and rost_file and dh_rost_file
 
 if all_uploaded:
     try:
@@ -778,19 +691,19 @@ if all_uploaded:
         flt_df["date_parsed"]=pd.to_datetime(flt_df["Date"],format="%d%b%y")
         available=sorted(flt_df[flt_df["운항 Crew"].notna()]["date_parsed"].dt.to_period("M").unique(),reverse=True)
 
-        selected_str=st.selectbox("📅 정산할 월 선택",[str(p) for p in available])
-        sel=pd.Period(selected_str,freq="M"); target_year,target_month=sel.year,sel.month
-
-        base_df, dh_exclude, ob_exclude = parse_integrated_roster_file(dhc_file, target_month, target_year)
-        calc_df   = calc_summary(base_df)
+        base_df   = parse_dhc_file(dhc_file)
+        ob_df     = parse_obca_file(ob_file)
+        calc_df   = calc_summary(base_df, ob_df)
         instr_det = parse_roster_file(rost_file)  # 월 필터는 정산 실행 시 적용
+        dh_exclude = parse_roster_dh_exclude(dh_rost_file)  # DHC Roster에서 DH 탑승자 자동 추출
 
         n_instr = instr_det["이름"].nunique() if not instr_det.empty else 0
         n_dh_pairs = len(dh_exclude)
-        n_ob_pairs = len(ob_exclude)
         dh_names_all = set(n for names in dh_exclude.values() for n in names)
-        ob_names_all = set(n for names in ob_exclude.values() for n in names)
-        st.success(f"✅ 3개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH제외 {len(dh_names_all)}명({n_dh_pairs}건) · OBCA/OBFO제외 {len(ob_names_all)}명({n_ob_pairs}건)")
+        st.success(f"✅ 5개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH제외 {len(dh_names_all)}명({n_dh_pairs}건)")
+
+        selected_str=st.selectbox("📅 정산할 월 선택",[str(p) for p in available])
+        sel=pd.Period(selected_str,freq="M"); target_year,target_month=sel.year,sel.month
 
         with st.expander("ℹ️ 계산 기준 보기"):
             st.markdown("""
@@ -807,7 +720,6 @@ if all_uploaded:
 | **교관수당 3P** | BH × 1/3 (HNL) |
 | **교관 DC** | LIP·LCP·DLCP·I·I* (BH 없으면 무시) |
 | **DH 제외** | Roster DC='DH' 자동 감지 → 해당 승무원 연장·야간 제외 |
-| **OBCA/OBFO 제외** | 통합 Crew Roster Pos='OBCA'/'OBFO' 자동 감지 → 해당 승무원 연장·야간 제외 |
             """)
 
         if dh_exclude:
@@ -815,15 +727,10 @@ if all_uploaded:
                 for (date_str, flt_no), names in sorted(dh_exclude.items()):
                     st.write(f"**{date_str} 편명 {flt_no}**: {', '.join(sorted(names))}")
 
-        if ob_exclude:
-            with st.expander(f"🧾 OBCA/OBFO 자동 감지 현황 ({len(ob_exclude)}건) — 클릭해서 확인"):
-                for (date_str, flt_no), names in sorted(ob_exclude.items()):
-                    st.write(f"**{date_str} 편명 {flt_no}**: {', '.join(sorted(names))}")
-
 
         if st.button("🚀 정산 실행", type="primary", use_container_width=True):
             with st.spinner("계산 중..."):
-                flt_sum, flt_det = process_flt(flt_df, target_month, target_year, dh_exclude, ob_exclude)
+                flt_sum, flt_det = process_flt(flt_df, target_month, target_year, dh_exclude)
                 instr_det = parse_roster_file(rost_file, target_month, target_year)
 
             if flt_sum.empty:
@@ -917,6 +824,8 @@ if all_uploaded:
 else:
     missing=[]
     if not flt_file:      missing.append("FltReport.xlsx")
-    if not dhc_file:      missing.append("Crew Roster.xlsx (총비행시간·DAYOFF·DH·OBCA/OBFO)")
+    if not dhc_file:      missing.append("월DHC_DAYOFF_총비행시간.xlsx")
+    if not ob_file:       missing.append("OBCA.xlsx")
     if not rost_file:     missing.append("Roster.xlsx (교관수당)")
+    if not dh_rost_file:  missing.append("Roster.xlsx (DHC — DH자동감지)")
     st.info(f"아래 파일을 모두 업로드해주세요: {' · '.join(missing)}")
