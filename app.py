@@ -10,12 +10,10 @@ from openpyxl.utils import get_column_letter
 
 KST_OFFSET = timedelta(hours=9)
 SET1_DEST  = {'DAD','BKK','HKG','NRT'}
-SET2_DEST  = {'DAC','LAX','EWR','SFO'}
+SET2_DEST  = {'DAC','LAX','EWR','SFO','IAD'}
 SET3P_DEST = {'HNL'}
 INSTR_DC   = {'LIP','LCP','DLCP','I','I*'}
-INSTR_EXCL = {'강용학','김문배','박충근','박형득','서세규'}  # 교관수당 제외 대상
-
-# DH 탑승자는 Roster 파일에서 자동 추출 (parse_roster_dh_exclude 함수 참조)
+INSTR_EXCL = {'강용학','김문배','박충근','박형득','서세규'}
 
 # ═══════════════════════════════════════════
 # 공통 유틸
@@ -62,59 +60,6 @@ def style_hdr(ws, row, headers, bg="1F4E79", height=20):
     ws.row_dimensions[row].height = height
 
 # ═══════════════════════════════════════════
-# Roster에서 DH 탑승자 자동 추출
-# ═══════════════════════════════════════════
-def parse_roster_dh_exclude(uploaded):
-    """
-    Roster 파일을 읽어 DC 컬럼이 'DH'인 행의
-    승무원 이름 + 날짜(Date 원본) + 편명(숫자부분)을 추출.
-    반환: dict { (date_str, flight_num_str): {이름, ...}, ... }
-    """
-    df = pd.read_excel(uploaded)
-    raw = df.copy()
-    name_indices = raw[raw.iloc[:,0].astype(str).str.match(r'^[가-힣]{2,5}:$', na=False)].index.tolist()
-    name_indices.append(len(raw))
-
-    dh_exclude = {}  # (date_str, flight_no) -> set of names
-
-    for idx_i, name_idx in enumerate(name_indices[:-1]):
-        crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
-        next_idx = name_indices[idx_i + 1]
-        hdr_rows = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
-        if len(hdr_rows) == 0:
-            continue
-        hdr_idx = hdr_rows[0]
-        data = raw.iloc[hdr_idx+1:next_idx].copy()
-        data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
-                        "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
-        data = data.reset_index(drop=True)
-        data["Date_ff"] = data["Date"].ffill()
-        data["Pairing_ff"] = data["Pairing"].ffill()
-
-        # DC가 DH인 행이 포함된 그룹에서 YP 실제비행 편명 추출
-        data["group_id"] = data["Pairing"].notna().cumsum()
-
-        for gid, grp in data.groupby("group_id"):
-            if not grp["DC"].astype(str).str.strip().str.upper().eq("DH").any():
-                continue
-            # 실제 비행편(YP로 시작)의 날짜+편명 수집
-            flights = grp[grp["Activity"].apply(is_actual_flight)]
-            for _, frow in flights.iterrows():
-                date_str = str(frow["Date_ff"]).strip()
-                activity = str(frow["Activity"]).strip()
-                # YP0131 → "131" 형식으로 정규화 (숫자만)
-                m = re.search(r'\d+', activity)
-                if not m:
-                    continue
-                flight_no = str(int(m.group())).lstrip("0") or "0"
-                key = (date_str, flight_no)
-                if key not in dh_exclude:
-                    dh_exclude[key] = set()
-                dh_exclude[key].add(crew_name)
-
-    return dh_exclude
-
-# ═══════════════════════════════════════════
 # 파일1: DHC / DAYOFF 파싱
 # ═══════════════════════════════════════════
 def parse_dhc_file(uploaded):
@@ -130,39 +75,27 @@ def parse_dhc_file(uploaded):
     dhc.columns=["Crew Code","DHC"]; dhc["DHC"]=dhc["DHC"].apply(parse_hhmm)
     return block.merge(dayoff, on="Crew Code").merge(dhc, on="Crew Code")
 
-# ═══════════════════════════════════════════
-# 파일2: OBCA / OBFO 파싱
-# ═══════════════════════════════════════════
-def parse_obca_file(uploaded):
-    df = pd.read_excel(uploaded)
-    data = df.iloc[6:].copy()
-    data.columns=["Crew Code","AC Type","Position","Block Hours","Cruise Time","Sectors","Valid From","Valid To"]
-    data = data[data["Crew Code"]!="Crew Code"].copy()
-    data["Crew Code"] = data["Crew Code"].ffill()
-    ob = data[data["Position"].isin(["OBFO","OBCA"])].copy()
-    ob["OB_hrs"] = ob["Block Hours"].apply(td_to_hours)
-    ob_sum = ob.groupby("Crew Code")["OB_hrs"].sum().reset_index()
-    ob_sum.columns=["Crew Code","OBCA_OBFO"]
-    return ob_sum
-
-def calc_summary(base_df, ob_df):
-    df = base_df.merge(ob_df, on="Crew Code", how="left")
-    df["OBCA_OBFO"] = df["OBCA_OBFO"].fillna(0)
+def calc_summary(base_df, ob_df=None):
+    df = base_df.copy()
+    if ob_df is not None and not ob_df.empty:
+        df = df.merge(ob_df, on="Crew Code", how="left")
+        df["OBCA_OBFO"] = df["OBCA_OBFO"].fillna(0)
+    else:
+        df["OBCA_OBFO"] = 0.0
     df["DHC_50"]    = df["DHC"] * 0.5
     df["Total_Flt"] = (df["Block"] + df["DHC_50"] - df["OBCA_OBFO"]).clip(lower=0)
     df["Dayoff_Under8"] = df["Dayoff"] < 8
     return df
 
 # ═══════════════════════════════════════════
-# 파일3: Roster 교관 수당 파싱
+# Roster 파싱 — 교관수당 + DH/OBCA/OBFO 자동 감지 통합
 # ═══════════════════════════════════════════
 AIRPORT_UTC = {
     'ICN': 9, 'NRT': 9, 'HKG': 8, 'BKK': 7, 'DAD': 7,
-    'LAX': -8, 'EWR': -5, 'SFO': -8, 'DAC': 6, 'HNL': -10,
+    'LAX': -8, 'EWR': -5, 'SFO': -8, 'IAD': -5, 'DAC': 6, 'HNL': -10,
 }
 
 def classify_route(from_val, to_val):
-    """FROM 또는 TO 기준으로 Set 분류 (ICN 제외한 공항 기준)"""
     for v in [from_val, to_val]:
         v = str(v).strip().upper()
         if v == 'ICN': continue
@@ -172,7 +105,6 @@ def classify_route(from_val, to_val):
     return None
 
 def local_to_kst(date_str, time_str, from_city):
-    """현지 출발시간 → KST datetime (공항별 UTC 오프셋 적용)"""
     try:
         base = datetime.datetime.strptime(str(date_str).strip(), "%d%b%y")
     except:
@@ -200,37 +132,57 @@ def calc_instr_hrs(blhr_h, set_type):
     return 0.0
 
 def is_actual_flight(activity):
-    """YP로 시작하는 실제 비행편 여부"""
     if pd.isna(activity): return False
     return str(activity).strip().upper().startswith("YP")
 
-def parse_roster_file(uploaded, target_month=None, target_year=None):
+def _get_crew_sections(uploaded):
+    """Roster 파일에서 승무원별 섹션 인덱스 반환"""
     df = pd.read_excel(uploaded)
     raw = df.copy()
     name_indices = raw[raw.iloc[:,0].astype(str).str.match(r'^[가-힣]{2,5}:$', na=False)].index.tolist()
     name_indices.append(len(raw))
+    return raw, name_indices
 
+def _parse_crew_data(raw, name_idx, next_idx):
+    """승무원 한 명의 스케줄 블록을 DataFrame으로 파싱
+    - 15컬럼: Date/Pairing/DC/Pos/CI_L/CO_L/Activity/From/Start_L/To/Finish_L/AC_Hotel/BH/FDP/Blhr (전체 Roster)
+    - 14컬럼: Date/Pairing/DC/CI_L/CO_L/Activity/From/Start_L/To/Finish_L/AC_Hotel/BH/FDP/Blhr (교관수당 Roster)
+    """
+    hdr_rows = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
+    if len(hdr_rows) == 0:
+        return None
+    hdr_idx = hdr_rows[0]
+    data = raw.iloc[hdr_idx+1:next_idx].copy()
+    ncols = len(data.columns)
+    if ncols >= 15:
+        data.columns = ["Date","Pairing","DC","Pos","CI_L","CO_L","Activity",
+                        "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"] + list(data.columns[15:])
+    else:
+        data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
+                        "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"] + list(data.columns[14:])
+        data["Pos"] = ""  # Pos 컬럼 없으면 빈값으로 추가
+    data = data.reset_index(drop=True)
+    data["Pairing_ff"] = data["Pairing"].ffill()
+    data["Date_ff"]    = data["Date"].ffill()
+    data["group_id"]   = data["Pairing"].notna().cumsum()
+    first_valid = data["Pairing_ff"].first_valid_index()
+    if first_valid is None:
+        return None
+    return data[(data.index >= first_valid) & (data["group_id"] > 0)]
+
+# ── 교관수당 전용 파싱 (기존 Roster — LIP/LCP/DLCP 포지션 추출) ─────────────
+def parse_roster_file(uploaded, target_month=None, target_year=None):
+    """교관 수당 파싱 전용"""
+    raw, name_indices = _get_crew_sections(uploaded)
     detail_rows = []
+
     for idx_i, name_idx in enumerate(name_indices[:-1]):
         crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
         if crew_name in INSTR_EXCL:
             continue
-        next_idx = name_indices[idx_i + 1]
-        hdr_rows = raw.iloc[name_idx:next_idx][raw.iloc[name_idx:next_idx, 0] == "Date"].index
-        if len(hdr_rows) == 0: continue
-        hdr_idx = hdr_rows[0]
-        data = raw.iloc[hdr_idx+1:next_idx].copy()
-        data.columns = ["Date","Pairing","DC","CI_L","CO_L","Activity",
-                        "From","Start_L","To","Finish_L","AC_Hotel","BH","FDP","Blhr"]
-        data = data.reset_index(drop=True)
-        data["Pairing_ff"] = data["Pairing"].ffill()
-        data["Date_ff"]    = data["Date"].ffill()
-
-        # ★ raw Pairing 열에 값이 등장할 때마다 새 그룹 (운항 단위 정확 분리)
-        data["group_id"] = data["Pairing"].notna().cumsum()
-        first_valid = data["Pairing_ff"].first_valid_index()
-        if first_valid is None: continue
-        data = data[(data.index >= first_valid) & (data["group_id"] > 0)]
+        data = _parse_crew_data(raw, name_idx, name_indices[idx_i + 1])
+        if data is None:
+            continue
 
         for gid, grp in data.groupby("group_id"):
             if grp["Pairing_ff"].isna().all(): continue
@@ -246,7 +198,6 @@ def parse_roster_file(uploaded, target_month=None, target_year=None):
                 set_type = classify_route(from_val, to_val)
                 if set_type is None: continue
 
-                # ★ 공항별 UTC 오프셋으로 KST 출발 시각 계산 → 월 귀속 판단
                 kst_dt = local_to_kst(row["Date_ff"], row["Start_L"], from_val)
                 if kst_dt is None: continue
                 if target_month and target_year:
@@ -273,12 +224,62 @@ def parse_roster_file(uploaded, target_month=None, target_year=None):
 
     return pd.DataFrame(detail_rows)
 
+# ── 전체 승무원 Roster 파싱 — DH/OBCA/OBFO 감지 + OBCA/OBFO Blhr 합산 ───────
+def parse_allcrew_roster(uploaded):
+    """
+    전체 승무원 Roster에서:
+    - DH 탑승자 → (date_str, flight_no) 기준 연장/야간 제외 목록
+    - OBCA/OBFO 탑승자 → 동일하게 제외 목록 + 승무원별 Blhr 합산 (총비행시간 차감)
+    반환: dh_ob_exclude dict, ob_sum DataFrame (Crew Code, OBCA_OBFO)
+    """
+    raw, name_indices = _get_crew_sections(uploaded)
+    dh_ob_exclude = {}   # (date_str, flight_no) -> set of names
+    ob_hours      = {}   # crew_name -> 누적 OBCA/OBFO Blhr(h)
+
+    for idx_i, name_idx in enumerate(name_indices[:-1]):
+        crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
+        data = _parse_crew_data(raw, name_idx, name_indices[idx_i + 1])
+        if data is None:
+            continue
+
+        for gid, grp in data.groupby("group_id"):
+            if grp["Pairing_ff"].isna().all(): continue
+
+            dc_vals  = grp["DC"].astype(str).str.strip().str.upper()
+            pos_vals = grp["Pos"].astype(str).str.strip().str.upper()
+            is_dh = dc_vals.eq("DH").any()
+            is_ob = pos_vals.isin(["OBFO","OBCA"]).any()
+
+            if not (is_dh or is_ob):
+                continue
+
+            flights = grp[grp["Activity"].apply(is_actual_flight)]
+            for _, frow in flights.iterrows():
+                date_str = str(frow["Date_ff"]).strip().upper()
+                activity = str(frow["Activity"]).strip()
+                m = re.search(r'\d+', activity)
+                if not m: continue
+                flight_no = str(int(m.group())).lstrip("0") or "0"
+                key = (date_str, flight_no)
+                dh_ob_exclude.setdefault(key, set()).add(crew_name)
+
+                # OBCA/OBFO만 Blhr 합산 (총비행시간 차감용)
+                if is_ob:
+                    blhr_h = parse_hhmm(frow["Blhr"])
+                    ob_hours[crew_name] = ob_hours.get(crew_name, 0.0) + blhr_h
+
+    ob_sum = pd.DataFrame([
+        {"Crew Code": name, "OBCA_OBFO": hrs}
+        for name, hrs in ob_hours.items()
+    ]) if ob_hours else pd.DataFrame(columns=["Crew Code","OBCA_OBFO"])
+
+    return dh_ob_exclude, ob_sum
+
 # ═══════════════════════════════════════════
 # FltReport 수당 계산
 # ═══════════════════════════════════════════
 def combine_dt(date_str, t):
     if pd.isna(t) or t is None: return None
-    # datetime/Timestamp 객체면 바로 사용, 문자열이면 파싱
     if isinstance(date_str, (datetime.datetime, pd.Timestamp)):
         base = date_str
     else:
@@ -303,10 +304,6 @@ def calc_night(ci, co):
         if o2>o1: total+=(o2-o1).total_seconds()/3600
     return total
 
-def calc_ot(atd, ata):
-    if not atd or not ata: return 0.0
-    return max(0.0, (ata-atd).total_seconds()/3600 - 8)
-
 def elapsed_hours(start, end):
     if not start or not end: return 0.0
     return max(0.0, (end-start).total_seconds()/3600)
@@ -328,14 +325,13 @@ def normalize_flight(flight):
         return str(flight).strip()
 
 def adjust_ci_co_dates(atd_utc, ci_utc, co_utc):
-    # FltReport Date is departure date. For early-UTC departures, C/I can be on the previous UTC day.
     if ci_utc and atd_utc and ci_utc > atd_utc:
         ci_utc -= timedelta(days=1)
     if co_utc and ci_utc and co_utc < ci_utc:
         co_utc += timedelta(days=1)
     return ci_utc, co_utc
 
-def process_flt(df, target_month, target_year, dh_exclude=None):
+def process_flt(df, target_month, target_year, dh_ob_exclude=None):
     sum_rows, det_rows = [], []
     grouped = {}
 
@@ -343,14 +339,12 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
         crew_str = row["운항 Crew"]
         if pd.isna(crew_str): continue
 
-        # Date 컬럼이 datetime 객체로 읽힐 수도 있으므로 두 형식 모두 처리
         raw_date = row["Date"]
         if isinstance(raw_date, (datetime.datetime, pd.Timestamp)):
             date_str = raw_date.strftime("%d%b%y").upper()
         else:
             date_str = str(raw_date).strip()
 
-        # 편명 정규화 (OAL 제외, 숫자형 방어)
         flight = normalize_flight(row["Flight"])
         if not flight:
             continue
@@ -367,33 +361,21 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
         ci_kst  = (ci_utc  + KST_OFFSET) if ci_utc  else None
         co_kst  = (co_utc  + KST_OFFSET) if co_utc  else None
 
-        # 자정 초과 보정
         if ata_kst and ata_kst < atd_kst: ata_kst += timedelta(days=1)
         if co_kst and ci_kst and co_kst < ci_kst: co_kst += timedelta(days=1)
 
-        night_ref_kst = ci_kst if ci_kst else atd_kst   # 야간 귀속 기준 시각
+        night_ref_kst = ci_kst if ci_kst else atd_kst
 
-        if atd_kst.month != target_month or atd_kst.year != target_year:
-            atd_in_month = False
-        else:
-            atd_in_month = True
-
-        night_in_month = (night_ref_kst.month == target_month and
-                          night_ref_kst.year  == target_year)
+        atd_in_month   = (atd_kst.month == target_month and atd_kst.year == target_year)
+        night_in_month = (night_ref_kst.month == target_month and night_ref_kst.year == target_year)
 
         if not atd_in_month and not night_in_month:
             continue
 
-        bl  = blhrs_decimal(row["Bl Hrs"])
-        night = calc_night(ci_kst, co_kst)
-
-        if not night_in_month:
-            night = 0.0
-
+        bl    = blhrs_decimal(row["Bl Hrs"])
+        night = calc_night(ci_kst, co_kst) if night_in_month else 0.0
         route = f"{row['From']}→{row['To']}"
 
-        # Same date/flight/crew can be split into multiple FltReport rows (e.g. ICN→ICN + ICN→EWR).
-        # Overtime must use the sum of operated segment durations, otherwise short split rows are dropped.
         key = (date_str, flight, str(crew_str).strip())
         if key not in grouped:
             grouped[key] = {
@@ -427,24 +409,24 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
         g["night"] += night
 
     for g in grouped.values():
-        flight = g["flight"]
-        date_str = g["date_str"]
+        flight       = g["flight"]
+        date_str     = g["date_str"]
         atd_in_month = g["atd_in_month"]
-        night = g["night"]
-        ot = max(0.0, g["seg_hours"] - 8) if atd_in_month else 0.0
-        p3 = g["p3_bl"] if atd_in_month else 0.0
+        night        = g["night"]
+        ot           = max(0.0, g["seg_hours"] - 8) if atd_in_month else 0.0
+        p3           = g["p3_bl"] if atd_in_month else 0.0
 
         if night == 0 and ot == 0 and p3 == 0:
             continue
 
-        route = " + ".join(g["routes"])
-        dh_key = (date_str, flight.lstrip("0") or "0")
-        excluded_names = (dh_exclude or {}).get(dh_key, set())
+        route    = " + ".join(g["routes"])
+        dh_key   = (date_str, flight.lstrip("0") or "0")
+        excluded = (dh_ob_exclude or {}).get(dh_key, set())
 
         for name in g["crew_str"].split():
             name = name.strip()
             if not name: continue
-            if name in excluded_names: continue
+            if name in excluded: continue
 
             sum_rows.append({"이름": name, "night": night, "ot": ot, "p3": p3})
             det_rows.append({
@@ -507,7 +489,7 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
     # ── 시트1: 수당 요약 ─────────────────────
     ws1=wb.active; ws1.title="수당 요약"
     title_row(ws1, f"{label} 운항 수당 정산표 — 요약", 5,
-              "※ 야간: 22:00~06:00(KST) C/I기준 귀속 | 연장: 일 8시간 초과(ATD기준) | 3P: 편명 0151·0152 | OAL 제외")
+              "※ 야간: 22:00~06:00(KST) C/I기준 귀속 | 연장: 일 8시간 초과(ATD기준) | 3P: 편명 0151·0152 | OAL·DH·OBCA/OBFO 제외")
     style_hdr(ws1, 3, ["No","이름","야간 시간","연장 시간","3P 시간"])
     for i,row in flt_sum.iterrows():
         r=i+4
@@ -589,7 +571,7 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
     ws5=wb.create_sheet("교관수당 요약")
     hdrs5=["No","이름","1set 합계","2set 합계","3P 합계","교관시간 총계"]
     title_row(ws5,f"{label} 교관 비행 수당 요약",len(hdrs5),
-              "※ 1set=BH전체(DAD·BKK·HKG·NRT) | 2set=BH×1/2(DAC·LAX·EWR·SFO) | 3P=BH×1/3(HNL)")
+              "※ 1set=BH전체(DAD·BKK·HKG·NRT) | 2set=BH×1/2(DAC·LAX·EWR·SFO·IAD) | 3P=BH×1/3(HNL)")
     style_hdr(ws5,3,hdrs5)
     if not instr_det.empty:
         instr_sum=(instr_det.groupby("이름").agg(
@@ -657,80 +639,81 @@ st.title("✈️ 운항 수당 정산기")
 st.caption("4개 파일 업로드 → 월 선택 → 정산 실행 → 엑셀 다운로드 (시트 6개)")
 st.divider()
 
-c1,c2 = st.columns(2)
+c1, c2 = st.columns(2)
 with c1:
     st.markdown("**📂 FltReport.xlsx**")
     st.caption("매월 2일 오전 9:30 메일 수신 · 발송처: yp-report@airpremia.com · 제목: PDC_FLT_Report")
-    flt_file  = st.file_uploader("FltReport.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_flt")
+    flt_file = st.file_uploader("FltReport.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_flt")
 
     st.markdown("**📂 월DHC_DAYOFF_총비행시간.xlsx**")
     st.caption("PDC → Reports → Counter report → Period 설정 → All in FD → Counter에 Block · Day off · DHC 선택 → 추출")
-    dhc_file  = st.file_uploader("월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
+    dhc_file = st.file_uploader("월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
 
-    st.markdown("**📂 OBCA.xlsx**")
-    st.caption("PDC → Experience → Period 설정 → All in FD → 추출")
-    ob_file   = st.file_uploader("OBCA.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_ob")
 with c2:
-    st.markdown("**📂 Roster.xlsx (교관수당)**")
-    st.caption("PDC → Crew roster → Period 설정 → Position(LIP·LCP·DLCP) 선택 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
-    rost_file = st.file_uploader("Roster.xlsx (교관수당)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
+    st.markdown("**📂 Roster.xlsx (교관수당용)**")
+    st.caption("PDC → Crew roster → Position(LIP·LCP·DLCP) → Period 설정 → Section(Schedule) → Time mode(UTC) → 추출")
+    rost_file = st.file_uploader("Roster.xlsx (교관수당용)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
 
-    st.markdown("**📂 Roster.xlsx (DHC — DH자동감지)**")
-    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Section(Schedule) 선택 → Time mode(Basetime) → 추출")
-    dh_rost_file = st.file_uploader("Roster.xlsx (DHC — DH자동감지)", type=["xlsx"], label_visibility="collapsed", key="up_dhrost")
+    st.markdown("**📂 Roster.xlsx (전체 승무원)**")
+    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Section(Schedule) → Time mode(UTC) → 추출 ※ DH·OBCA/OBFO 자동 감지")
+    allcrew_file = st.file_uploader("Roster.xlsx (전체 승무원)", type=["xlsx"], label_visibility="collapsed", key="up_allcrew")
 
-all_uploaded = flt_file and dhc_file and ob_file and rost_file and dh_rost_file
+all_uploaded = flt_file and dhc_file and rost_file and allcrew_file
 
 if all_uploaded:
     try:
         flt_df = pd.read_excel(flt_file)
-        required={"Date","Flight","ATD","ATA","Bl Hrs","운항 C/I","운항 C/O","운항 Crew"}
-        missing=required-set(flt_df.columns)
+        required = {"Date","Flight","ATD","ATA","Bl Hrs","운항 C/I","운항 C/O","운항 Crew"}
+        missing = required - set(flt_df.columns)
         if missing: st.error(f"FltReport 필수 열 없음: {missing}"); st.stop()
 
-        flt_df["date_parsed"]=pd.to_datetime(flt_df["Date"],format="%d%b%y")
-        available=sorted(flt_df[flt_df["운항 Crew"].notna()]["date_parsed"].dt.to_period("M").unique(),reverse=True)
+        flt_df["date_parsed"] = pd.to_datetime(flt_df["Date"], format="%d%b%y")
+        available = sorted(flt_df[flt_df["운항 Crew"].notna()]["date_parsed"].dt.to_period("M").unique(), reverse=True)
 
-        base_df   = parse_dhc_file(dhc_file)
-        ob_df     = parse_obca_file(ob_file)
-        calc_df   = calc_summary(base_df, ob_df)
-        instr_det = parse_roster_file(rost_file)  # 월 필터는 정산 실행 시 적용
-        dh_exclude = parse_roster_dh_exclude(dh_rost_file)  # DHC Roster에서 DH 탑승자 자동 추출
+        base_df = parse_dhc_file(dhc_file)
 
-        n_instr = instr_det["이름"].nunique() if not instr_det.empty else 0
-        n_dh_pairs = len(dh_exclude)
-        dh_names_all = set(n for names in dh_exclude.values() for n in names)
-        st.success(f"✅ 5개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH제외 {len(dh_names_all)}명({n_dh_pairs}건)")
+        # 전체 승무원 Roster → DH/OBCA/OBFO 제외 목록 + OBCA/OBFO Blhr 합산
+        dh_ob_exclude, ob_sum = parse_allcrew_roster(allcrew_file)
+        calc_df = calc_summary(base_df, ob_sum if not ob_sum.empty else None)
 
-        selected_str=st.selectbox("📅 정산할 월 선택",[str(p) for p in available])
-        sel=pd.Period(selected_str,freq="M"); target_year,target_month=sel.year,sel.month
+        # 교관수당 Roster → 교관수당 파싱
+        instr_det_all = parse_roster_file(rost_file)
+
+        n_instr    = instr_det_all["이름"].nunique() if not instr_det_all.empty else 0
+        n_dh_pairs = len(dh_ob_exclude)
+        dh_names   = set(n for names in dh_ob_exclude.values() for n in names)
+        n_ob       = len(ob_sum)
+        st.success(f"✅ 4개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH/OBCA/OBFO 제외 {len(dh_names)}명({n_dh_pairs}건) · OBCA/OBFO 차감 {n_ob}명")
+
+        selected_str = st.selectbox("📅 정산할 월 선택", [str(p) for p in available])
+        sel = pd.Period(selected_str, freq="M"); target_year, target_month = sel.year, sel.month
 
         with st.expander("ℹ️ 계산 기준 보기"):
             st.markdown("""
 | 항목 | 기준 |
 |------|------|
-| **야간** | 운항 C/I~C/O(KST) 중 22:00~06:00 겹치는 시간 / **C/I KST 기준 월 귀속** |
+| **야간** | 운항 C/I~C/O(KST) 중 22:00~06:00 겹치는 시간 / C/I KST 기준 월 귀속 |
 | **연장** | ATD~ATA(KST) 8시간 초과분 / ATD KST 기준 월 귀속 / 같은 편명 분할행은 구간 시간 합산 |
 | **3P** | 편명 0151·0152 Bl Hrs / ATD KST 기준 월 귀속 |
-| **OAL** | 편명에 OAL이 포함된 행은 야간·연장·3P 산출 제외 |
-| **총비행시간** | Block + DHC×50% - OBCA/OBFO |
+| **OAL** | 편명에 OAL 포함된 행 제외 |
+| **DH 제외** | 전체 Roster DC='DH' 자동 감지 → 연장·야간 제외 |
+| **OBCA/OBFO 제외** | 전체 Roster Pos='OBCA'/'OBFO' 자동 감지 → 연장·야간 제외 + 총비행시간 차감 |
+| **총비행시간** | Block + DHC×50% - OBCA/OBFO(Blhr 합산) |
 | **DAYOFF 미달** | 월 DAYOFF 8회 미만 |
 | **교관수당 1set** | BH 전체 (DAD·BKK·HKG·NRT) |
-| **교관수당 2set** | BH × 1/2 (DAC·LAX·EWR·SFO) |
+| **교관수당 2set** | BH × 1/2 (DAC·LAX·EWR·SFO·IAD) |
 | **교관수당 3P** | BH × 1/3 (HNL) |
-| **교관 DC** | LIP·LCP·DLCP·I·I* (BH 없으면 무시) |
-| **DH 제외** | Roster DC='DH' 자동 감지 → 해당 승무원 연장·야간 제외 |
+| **교관 DC** | LIP·LCP·DLCP·I·I* |
             """)
 
-        if dh_exclude:
-            with st.expander(f"✈️ DH 자동 감지 현황 ({len(dh_exclude)}건) — 클릭해서 확인"):
-                for (date_str, flt_no), names in sorted(dh_exclude.items()):
+        if dh_ob_exclude:
+            with st.expander(f"✈️ DH/OBCA/OBFO 자동 감지 현황 ({len(dh_ob_exclude)}건)"):
+                for (date_str, flt_no), names in sorted(dh_ob_exclude.items()):
                     st.write(f"**{date_str} 편명 {flt_no}**: {', '.join(sorted(names))}")
-
 
         if st.button("🚀 정산 실행", type="primary", use_container_width=True):
             with st.spinner("계산 중..."):
-                flt_sum, flt_det = process_flt(flt_df, target_month, target_year, dh_exclude)
+                flt_sum, flt_det = process_flt(flt_df, target_month, target_year, dh_ob_exclude)
                 instr_det = parse_roster_file(rost_file, target_month, target_year)
 
             if flt_sum.empty:
@@ -811,8 +794,8 @@ if all_uploaded:
                             cc2.metric("2set",fmt_hhmm(vw2[vw2["Set구분"]=="2set"]["교관시간_h"].sum()))
                             cc3.metric("3P",fmt_hhmm(vw2[vw2["Set구분"]=="3P"]["교관시간_h"].sum()))
 
-                excel_buf=build_excel(flt_sum,flt_det,calc_df,instr_det,target_year,target_month)
-                fname=f"{target_year}년{target_month:02d}월_운항정산.xlsx"
+                excel_buf = build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
+                fname = f"{target_year}년{target_month:02d}월_운항정산.xlsx"
                 st.download_button(
                     label="⬇️ 엑셀 다운로드 (6개 시트: 수당요약·개인상세·총비행시간·DAYOFF·교관요약·교관상세)",
                     data=excel_buf, file_name=fname,
@@ -825,7 +808,6 @@ else:
     missing=[]
     if not flt_file:      missing.append("FltReport.xlsx")
     if not dhc_file:      missing.append("월DHC_DAYOFF_총비행시간.xlsx")
-    if not ob_file:       missing.append("OBCA.xlsx")
-    if not rost_file:     missing.append("Roster.xlsx (교관수당)")
-    if not dh_rost_file:  missing.append("Roster.xlsx (DHC — DH자동감지)")
+    if not rost_file:     missing.append("Roster.xlsx (교관수당용)")
+    if not allcrew_file:  missing.append("Roster.xlsx (전체 승무원)")
     st.info(f"아래 파일을 모두 업로드해주세요: {' · '.join(missing)}")
