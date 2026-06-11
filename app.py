@@ -307,13 +307,38 @@ def calc_ot(atd, ata):
     if not atd or not ata: return 0.0
     return max(0.0, (ata-atd).total_seconds()/3600 - 8)
 
+def elapsed_hours(start, end):
+    if not start or not end: return 0.0
+    return max(0.0, (end-start).total_seconds()/3600)
+
 def blhrs_decimal(t):
     if pd.isna(t) or t is None: return 0.0
     if isinstance(t, time): return t.hour + t.minute/60 + t.second/3600
     return 0.0
 
+def is_oal_flight(flight):
+    return "OAL" in str(flight).strip().upper()
+
+def normalize_flight(flight):
+    if is_oal_flight(flight):
+        return None
+    try:
+        return str(int(float(str(flight)))).zfill(4)
+    except:
+        return str(flight).strip()
+
+def adjust_ci_co_dates(atd_utc, ci_utc, co_utc):
+    # FltReport Date is departure date. For early-UTC departures, C/I can be on the previous UTC day.
+    if ci_utc and atd_utc and ci_utc > atd_utc:
+        ci_utc -= timedelta(days=1)
+    if co_utc and ci_utc and co_utc < ci_utc:
+        co_utc += timedelta(days=1)
+    return ci_utc, co_utc
+
 def process_flt(df, target_month, target_year, dh_exclude=None):
     sum_rows, det_rows = [], []
+    grouped = {}
+
     for _, row in df.iterrows():
         crew_str = row["운항 Crew"]
         if pd.isna(crew_str): continue
@@ -325,17 +350,17 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
         else:
             date_str = str(raw_date).strip()
 
-        # 편명 정규화 (숫자형 방어)
-        try:
-            flight = str(int(float(str(row["Flight"])))).zfill(4)
-        except:
-            flight = str(row["Flight"]).strip()
+        # 편명 정규화 (OAL 제외, 숫자형 방어)
+        flight = normalize_flight(row["Flight"])
+        if not flight:
+            continue
 
         atd_utc = combine_dt(date_str, row["ATD"])
         if not atd_utc: continue
         ata_utc = combine_dt(date_str, row["ATA"])
         ci_utc  = combine_dt(date_str, row["운항 C/I"])
         co_utc  = combine_dt(date_str, row["운항 C/O"])
+        ci_utc, co_utc = adjust_ci_co_dates(atd_utc, ci_utc, co_utc)
 
         atd_kst = atd_utc + KST_OFFSET
         ata_kst = (ata_utc + KST_OFFSET) if ata_utc else None
@@ -361,21 +386,62 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
 
         bl  = blhrs_decimal(row["Bl Hrs"])
         night = calc_night(ci_kst, co_kst)
-        ot    = calc_ot(atd_kst, ata_kst) if atd_in_month else 0.0
-        p3    = (bl if flight in ["0151", "0152"] else 0.0) if atd_in_month else 0.0
 
         if not night_in_month:
             night = 0.0
 
+        route = f"{row['From']}→{row['To']}"
+
+        # Same date/flight/crew can be split into multiple FltReport rows (e.g. ICN→ICN + ICN→EWR).
+        # Overtime must use the sum of operated segment durations, otherwise short split rows are dropped.
+        key = (date_str, flight, str(crew_str).strip())
+        if key not in grouped:
+            grouped[key] = {
+                "date_str": date_str,
+                "flight": flight,
+                "crew_str": str(crew_str).strip(),
+                "routes": [],
+                "atd_kst": atd_kst,
+                "ata_kst": ata_kst,
+                "ci_kst": ci_kst,
+                "co_kst": co_kst,
+                "atd_in_month": atd_in_month,
+                "seg_hours": 0.0,
+                "night": 0.0,
+                "p3_bl": 0.0,
+            }
+        g = grouped[key]
+        g["routes"].append(route)
+        if atd_kst and (not g["atd_kst"] or atd_kst < g["atd_kst"]):
+            g["atd_kst"] = atd_kst
+        if ata_kst and (not g["ata_kst"] or ata_kst > g["ata_kst"]):
+            g["ata_kst"] = ata_kst
+        if ci_kst and (not g["ci_kst"] or ci_kst < g["ci_kst"]):
+            g["ci_kst"] = ci_kst
+        if co_kst and (not g["co_kst"] or co_kst > g["co_kst"]):
+            g["co_kst"] = co_kst
+        if atd_in_month:
+            g["seg_hours"] += elapsed_hours(atd_kst, ata_kst)
+            if flight in ["0151", "0152"]:
+                g["p3_bl"] += bl
+        g["night"] += night
+
+    for g in grouped.values():
+        flight = g["flight"]
+        date_str = g["date_str"]
+        atd_in_month = g["atd_in_month"]
+        night = g["night"]
+        ot = max(0.0, g["seg_hours"] - 8) if atd_in_month else 0.0
+        p3 = g["p3_bl"] if atd_in_month else 0.0
+
         if night == 0 and ot == 0 and p3 == 0:
             continue
 
-        route = f"{row['From']}→{row['To']}"
-
+        route = " + ".join(g["routes"])
         dh_key = (date_str, flight.lstrip("0") or "0")
         excluded_names = (dh_exclude or {}).get(dh_key, set())
 
-        for name in str(crew_str).split():
+        for name in g["crew_str"].split():
             name = name.strip()
             if not name: continue
             if name in excluded_names: continue
@@ -383,13 +449,13 @@ def process_flt(df, target_month, target_year, dh_exclude=None):
             sum_rows.append({"이름": name, "night": night, "ot": ot, "p3": p3})
             det_rows.append({
                 "이름":     name,
-                "날짜":     atd_kst.strftime("%m/%d"),
+                "날짜":     g["atd_kst"].strftime("%m/%d"),
                 "편명":     flight,
                 "구간":     route,
-                "ATD(KST)": fmt_time(atd_kst),
-                "ATA(KST)": fmt_time(ata_kst),
-                "CI(KST)":  fmt_time(ci_kst),
-                "CO(KST)":  fmt_time(co_kst),
+                "ATD(KST)": fmt_time(g["atd_kst"]),
+                "ATA(KST)": fmt_time(g["ata_kst"]),
+                "CI(KST)":  fmt_time(g["ci_kst"]),
+                "CO(KST)":  fmt_time(g["co_kst"]),
                 "야간(h)":  night,
                 "연장(h)":  ot,
                 "3P(h)":    p3,
@@ -441,7 +507,7 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
     # ── 시트1: 수당 요약 ─────────────────────
     ws1=wb.active; ws1.title="수당 요약"
     title_row(ws1, f"{label} 운항 수당 정산표 — 요약", 5,
-              "※ 야간: 22:00~06:00(KST) C/I기준 귀속 | 연장: 일 8시간 초과(ATD기준) | 3P: 편명 0151·0152")
+              "※ 야간: 22:00~06:00(KST) C/I기준 귀속 | 연장: 일 8시간 초과(ATD기준) | 3P: 편명 0151·0152 | OAL 제외")
     style_hdr(ws1, 3, ["No","이름","야간 시간","연장 시간","3P 시간"])
     for i,row in flt_sum.iterrows():
         r=i+4
@@ -644,8 +710,9 @@ if all_uploaded:
 | 항목 | 기준 |
 |------|------|
 | **야간** | 운항 C/I~C/O(KST) 중 22:00~06:00 겹치는 시간 / **C/I KST 기준 월 귀속** |
-| **연장** | ATD~ATA(KST) 8시간 초과분 / ATD KST 기준 월 귀속 |
+| **연장** | ATD~ATA(KST) 8시간 초과분 / ATD KST 기준 월 귀속 / 같은 편명 분할행은 구간 시간 합산 |
 | **3P** | 편명 0151·0152 Bl Hrs / ATD KST 기준 월 귀속 |
+| **OAL** | 편명에 OAL이 포함된 행은 야간·연장·3P 산출 제외 |
 | **총비행시간** | Block + DHC×50% - OBCA/OBFO |
 | **DAYOFF 미달** | 월 DAYOFF 8회 미만 |
 | **교관수당 1set** | BH 전체 (DAD·BKK·HKG·NRT) |
