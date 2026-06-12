@@ -164,7 +164,44 @@ def _parse_crew_data(raw, name_idx, next_idx):
     data = data.reset_index(drop=True)
     data["Pairing_ff"] = data["Pairing"].ffill()
     data["Date_ff"]    = data["Date"].ffill()
-    data["group_id"]   = data["Pairing"].notna().cumsum()
+
+    # 사이클 구분: Pairing이 재등장할 때 이전 사이클에 오는편(짝수 편명)이 있으면 새 사이클
+    group_id = 0
+    last_pairing = None
+    last_had_return = False  # 이전 사이클에 짝수(오는편) 편명이 있었는지
+    group_ids = []
+    pending_flights = set()   # 현재 사이클의 편명 번호들
+
+    for i, row in data.iterrows():
+        pairing = row["Pairing"]
+        activity = str(row["Activity"]).strip() if not pd.isna(row["Activity"]) else ""
+        is_flight = activity.upper().startswith("YP")
+
+        if not pd.isna(pairing):
+            if last_pairing != str(pairing):
+                # Pairing 값 자체가 바뀜 → 무조건 새 사이클
+                group_id += 1
+                pending_flights = set()
+                last_had_return = False
+            else:
+                # 같은 Pairing 재등장 → 이전 사이클에 짝수편명 있었으면 새 사이클
+                if last_had_return:
+                    group_id += 1
+                    pending_flights = set()
+                    last_had_return = False
+            last_pairing = str(pairing)
+
+        if is_flight:
+            m = re.search(r'\d+', activity)
+            if m:
+                num = int(m.group())
+                pending_flights.add(num)
+                if num % 2 == 0:  # 짝수 = 오는편 완료
+                    last_had_return = True
+
+        group_ids.append(group_id)
+
+    data["group_id"] = group_ids
     first_valid = data["Pairing_ff"].first_valid_index()
     if first_valid is None:
         return None
@@ -188,9 +225,24 @@ def parse_roster_file(uploaded, target_month=None, target_year=None):
             if grp["Pairing_ff"].isna().all(): continue
             if not grp["DC"].isin(INSTR_DC).any(): continue
 
-            flights = grp[grp["Activity"].apply(is_actual_flight)].copy()
-            flights["Blhr_h"] = flights["Blhr"].apply(parse_hhmm)
-            flights = flights[flights["Blhr_h"] > 0]
+            all_flights = grp[grp["Activity"].apply(is_actual_flight)].copy()
+            all_flights["Blhr_h"] = all_flights["Blhr"].apply(parse_hhmm)
+            all_flights = all_flights[all_flights["Blhr_h"] > 0]
+
+            # INSTR_DC 붙은 편명 번호의 홀짝 쌍만 포함
+            instr_nums = set()
+            for _, fr in all_flights[all_flights["DC"].isin(INSTR_DC)].iterrows():
+                m = re.search(r'\d+', str(fr["Activity"]))
+                if not m: continue
+                num = int(m.group())
+                instr_nums.add(num)
+                instr_nums.add(num + 1 if num % 2 == 1 else num - 1)
+
+            def in_pair(activity):
+                m = re.search(r'\d+', str(activity))
+                return int(m.group()) in instr_nums if m else False
+
+            flights = all_flights[all_flights["Activity"].apply(in_pair)]
 
             for _, row in flights.iterrows():
                 from_val = str(row["From"]).strip() if not pd.isna(row["From"]) else ""
