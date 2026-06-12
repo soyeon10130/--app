@@ -707,7 +707,7 @@ with c2:
     rost_file = st.file_uploader("Roster.xlsx (교관수당용)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
 
     st.markdown("**📂 Roster.xlsx (전체 승무원)**")
-    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Section(Schedule) → Time mode(UTC) → 추출 ※ DH·OBCA/OBFO 자동 감지")
+    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Counter에 Pairing · duty code · working position · Block · Day off · DHC 선택 → 추출")
     allcrew_file = st.file_uploader("Roster.xlsx (전체 승무원)", type=["xlsx"], label_visibility="collapsed", key="up_allcrew")
 
 all_uploaded = flt_file and dhc_file and rost_file and allcrew_file
