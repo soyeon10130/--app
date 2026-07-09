@@ -75,6 +75,36 @@ def parse_dhc_file(uploaded):
     dhc.columns=["Crew Code","DHC"]; dhc["DHC"]=dhc["DHC"].apply(parse_hhmm)
     return block.merge(dayoff, on="Crew Code").merge(dhc, on="Crew Code")
 
+# ═══════════════════════════════════════════
+# 파일: OBCA.xlsx 전용 파싱 (OBCA/OBFO Block Hours 합산)
+# ═══════════════════════════════════════════
+def parse_obca_file(uploaded):
+    """
+    OBCA.xlsx 전용 리포트 파싱 (Crew Code / AC Type / Position / Block Hours ... 형식,
+    8번째 행이 헤더). Position이 OBFO 또는 OBCA인 행의 Block Hours(timedelta)를
+    승무원별로 합산하여 반환.
+    """
+    df = pd.read_excel(uploaded)
+    data = df.iloc[6:].copy()
+    data.columns = ["Crew Code","AC Type","Position","Block Hours","Cruise Time","Sectors","Valid From","Valid To"]
+    data = data[data["Crew Code"] != "Crew Code"].copy()
+    data["Crew Code"] = data["Crew Code"].ffill()
+    ob = data[data["Position"].isin(["OBFO","OBCA"])].copy()
+    ob["OB_hrs"] = ob["Block Hours"].apply(td_to_hours)
+    ob_sum = ob.groupby("Crew Code")["OB_hrs"].sum().reset_index()
+    ob_sum.columns=["Crew Code","OBCA_OBFO"]
+    return ob_sum
+
+def merge_ob_sums(*ob_dfs):
+    """여러 출처(전체 승무원 Roster 자동감지 + 별도 OBCA.xlsx)의 OBCA/OBFO 합산분을
+    승무원(Crew Code)별로 합쳐서 하나의 DataFrame으로 반환. 이중 계산 방지를 위해
+    각 출처는 서로 겹치지 않는 것을 전제로 단순 합산한다."""
+    frames = [d for d in ob_dfs if d is not None and not d.empty]
+    if not frames:
+        return pd.DataFrame(columns=["Crew Code","OBCA_OBFO"])
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.groupby("Crew Code")["OBCA_OBFO"].sum().reset_index()
+
 def calc_summary(base_df, ob_df=None):
     df = base_df.copy()
     if ob_df is not None and not ob_df.empty:
@@ -688,7 +718,7 @@ def build_excel(flt_sum, flt_det, calc_df, instr_det, target_year, target_month)
 # ═══════════════════════════════════════════
 st.set_page_config(page_title="운항 수당 정산기", page_icon="✈️", layout="centered")
 st.title("✈️ 운항 수당 정산기")
-st.caption("4개 파일 업로드 → 월 선택 → 정산 실행 → 엑셀 다운로드 (시트 6개)")
+st.caption("5개 파일 업로드 → 월 선택 → 정산 실행 → 엑셀 다운로드 (시트 6개)")
 st.divider()
 
 c1, c2 = st.columns(2)
@@ -701,6 +731,10 @@ with c1:
     st.caption("PDC → Reports → Counter report → Period 설정 → All in FD → Counter에 Block · Day off · DHC 선택 → 추출")
     dhc_file = st.file_uploader("월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
 
+    st.markdown("**📂 OBCA.xlsx (OBCA/OBFO 전용)**")
+    st.caption("PDC → Reports → Position: OBCA·OBFO → Period 설정 → Block Hours 포함 → 추출")
+    ob_file = st.file_uploader("OBCA.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_ob")
+
 with c2:
     st.markdown("**📂 Roster.xlsx (교관수당용)**")
     st.caption("PDC → Crew roster → Position(LIP·LCP·DLCP) → Period 설정 → Section(Schedule) → Time mode(UTC) → 추출")
@@ -710,7 +744,7 @@ with c2:
     st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Counter에 Pairing · duty code · working position · Block · Day off · DHC 선택 → 추출")
     allcrew_file = st.file_uploader("Roster.xlsx (전체 승무원)", type=["xlsx"], label_visibility="collapsed", key="up_allcrew")
 
-all_uploaded = flt_file and dhc_file and rost_file and allcrew_file
+all_uploaded = flt_file and dhc_file and ob_file and rost_file and allcrew_file
 
 if all_uploaded:
     try:
@@ -724,9 +758,16 @@ if all_uploaded:
 
         base_df = parse_dhc_file(dhc_file)
 
-        # 전체 승무원 Roster → DH/OBCA/OBFO 제외 목록 + OBCA/OBFO Blhr 합산
-        dh_ob_exclude, ob_sum = parse_allcrew_roster(allcrew_file)
-        calc_df = calc_summary(base_df, ob_sum if not ob_sum.empty else None)
+        # 전체 승무원 Roster → DH/OBCA/OBFO 제외 목록 + OBCA/OBFO Blhr 합산(자동 감지분)
+        dh_ob_exclude, ob_sum_roster = parse_allcrew_roster(allcrew_file)
+
+        # 별도 OBCA.xlsx → OBCA/OBFO Block Hours 합산(전용 파일분)
+        ob_sum_file = parse_obca_file(ob_file)
+
+        # 두 출처 합산 (승무원별로 겹치지 않는다는 전제하에 단순 합산)
+        ob_sum = merge_ob_sums(ob_sum_roster, ob_sum_file)
+
+        calc_df = calc_summary(base_df, ob_sum)
 
         # 교관수당 Roster → 교관수당 파싱
         instr_det_all = parse_roster_file(rost_file)
@@ -735,7 +776,7 @@ if all_uploaded:
         n_dh_pairs = len(dh_ob_exclude)
         dh_names   = set(n for names in dh_ob_exclude.values() for n in names)
         n_ob       = len(ob_sum)
-        st.success(f"✅ 4개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH/OBCA/OBFO 제외 {len(dh_names)}명({n_dh_pairs}건) · OBCA/OBFO 차감 {n_ob}명")
+        st.success(f"✅ 5개 파일 로드 완료 — FltReport {len(flt_df):,}행 · 승무원 {len(base_df)}명 · 교관 {n_instr}명 · DH/OBCA/OBFO 제외 {len(dh_names)}명({n_dh_pairs}건) · OBCA/OBFO 차감 {n_ob}명")
 
         selected_str = st.selectbox("📅 정산할 월 선택", [str(p) for p in available])
         sel = pd.Period(selected_str, freq="M"); target_year, target_month = sel.year, sel.month
@@ -749,7 +790,8 @@ if all_uploaded:
 | **3P** | 편명 0151·0152 Bl Hrs / ATD KST 기준 월 귀속 |
 | **OAL** | 편명에 OAL 포함된 행 제외 |
 | **DH 제외** | 전체 Roster DC='DH' 자동 감지 → 연장·야간 제외 |
-| **OBCA/OBFO 제외** | 전체 Roster Pos='OBCA'/'OBFO' 자동 감지 → 연장·야간 제외 + 총비행시간 차감 |
+| **OBCA/OBFO 제외** | 전체 Roster Pos='OBCA'/'OBFO' 자동 감지 → 연장·야간 제외 |
+| **OBCA/OBFO 차감** | 전체 Roster 자동감지분 + 별도 OBCA.xlsx 합산분 → 총비행시간 차감 |
 | **총비행시간** | Block + DHC×50% - OBCA/OBFO(Blhr 합산) |
 | **DAYOFF 미달** | 월 DAYOFF 8회 미만 |
 | **교관수당 1set** | BH 전체 (DAD·BKK·HKG·NRT) |
@@ -860,6 +902,7 @@ else:
     missing=[]
     if not flt_file:      missing.append("FltReport.xlsx")
     if not dhc_file:      missing.append("월DHC_DAYOFF_총비행시간.xlsx")
+    if not ob_file:       missing.append("OBCA.xlsx")
     if not rost_file:     missing.append("Roster.xlsx (교관수당용)")
     if not allcrew_file:  missing.append("Roster.xlsx (전체 승무원)")
     st.info(f"아래 파일을 모두 업로드해주세요: {' · '.join(missing)}")
