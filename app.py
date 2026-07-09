@@ -732,7 +732,7 @@ with c1:
     dhc_file = st.file_uploader("월DHC_DAYOFF_총비행시간.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_dhc")
 
     st.markdown("**📂 OBCA.xlsx (OBCA/OBFO 전용)**")
-    st.caption("PDC → Reports → Position: OBCA·OBFO → Period 설정 → Block Hours 포함 → 추출")
+    st.caption("PDC → Reports → Experience → 기간 선택 및 출력")
     ob_file = st.file_uploader("OBCA.xlsx", type=["xlsx"], label_visibility="collapsed", key="up_ob")
 
 with c2:
@@ -741,7 +741,7 @@ with c2:
     rost_file = st.file_uploader("Roster.xlsx (교관수당용)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
 
     st.markdown("**📂 Roster.xlsx (전체 승무원)**")
-    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Counter에 Pairing · duty code · working position · Block · Day off · DHC 선택 → 추출")
+    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Counter에 Pairing · duty code · working position · check in(local) · check out (local) · Activity · From · To · A/C HOTEL · Block · FDP TIME 선택 → 추출")
     allcrew_file = st.file_uploader("Roster.xlsx (전체 승무원)", type=["xlsx"], label_visibility="collapsed", key="up_allcrew")
 
 all_uploaded = flt_file and dhc_file and ob_file and rost_file and allcrew_file
