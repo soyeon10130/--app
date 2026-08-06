@@ -18,24 +18,25 @@ INSTR_EXCL = {'강용학','김문배','박충근','박형득','서세규'}
 # ═══════════════════════════════════════════
 # 램프리턴/불이착 자동 보정
 # ═══════════════════════════════════════════
-RAMP_RETURN_SHORT_THRESHOLD_H = 0.5   # 이보다 짧으면 '이륙 전 회항(RTG)'으로 보고 완전 삭제
-RAMP_RETURN_GAP_WINDOW_H      = 6.0   # 회항 도착~재출발 ATD 간격이 이보다 크면 별도 비행으로 보고 병합 안함
+RAMP_RETURN_GAP_WINDOW_H = 6.0   # 회항 도착~재출발 ATD 간격이 이보다 크면 별도 비행(다음날 등)으로 보고 병합 안함
 
 def normalize_ramp_returns(df):
     """
-    FltReport 원본에서 램프리턴/불이착(From==To, 짧은 회항)을 자동 감지해
+    FltReport 원본에서 램프리턴/불이착(From==To 회항편)을 자동 감지해
     운항정산 계산 전에 보정한다.
 
-    처리 규칙:
+    처리 규칙 (연장시간 = ATD~ATA 전체 경과시간 기준, 같은 편명 램프리턴에만 적용):
       1) From==To 행(회항편)을 찾는다.
       2) 같은 편명 · 같은 출발지에서 그 이후에 실제로 목적지가 다른(To!=From)
          재출발 행을 찾는다 (회항 도착 후 RAMP_RETURN_GAP_WINDOW_H 시간 이내).
-      3) 회항편의 Bl Hrs(실제 비행시간)가 RAMP_RETURN_SHORT_THRESHOLD_H 미만이면
-         → '이륙 전 회항(RTG)'으로 보고 그 행을 통째로 삭제 (재출발편은 원본 그대로 사용)
-      4) 그 이상이면 → 실제 램프리턴(Air Turnback)으로 보고 두 행을 하나로 병합:
-         ATD는 회항편(최초 출발 시각), ATA·Bl Hrs·운항 C/I·운항 C/O·To는 재출발편 값 사용
-      5) 재출발편을 찾지 못하거나 간격이 너무 크면(다음날 등) 원본을 그대로 둔다
-         (예: SFO→SFO 램프리턴 후 다음날 새 편으로 출발한 케이스)
+      3) 회항 시간 길이와 상관없이(이륙 전 회항이든 실제 공중 회항이든) 두 행을 하나로 병합:
+         ATD는 회항편의 최초 출발 시각, ATA·Bl Hrs·운항 C/I·운항 C/O·To는 재출발편 값을 사용.
+         → 연장시간(ATD~ATA 경과시간) 계산 시 회항에 걸린 시간까지 전부 포함됨.
+      4) 재출발편을 찾지 못하거나 간격이 너무 크면(다음날 새 비행 등) 원본을 그대로 둔다
+         (예: SFO→SFO 램프리턴 후 다음날 새 편으로 출발한 케이스는 별도 duty로 보고 병합하지 않음)
+
+    ※ 편명이 다른 당일 왕복(예: NRT 731 나가고 732 들어오는 경우)은 이 병합 대상이 아니며,
+    기존 방식대로 각 편명별로 개별 계산된다.
 
     ※ 주의: 목적지가 아예 다른 공항으로 바뀌는 '진짜 다이버트'(예: 예정 도착지가 ICN인데
     실제로는 다른 공항에 착륙한 뒤 별도의 이동편이 필요한 경우)는 원본 FltReport에
@@ -66,7 +67,7 @@ def normalize_ramp_returns(df):
 
     drop_idx = set()
     replace_rows = {}
-    merge_log = []   # (편명, 날짜, 유형) 기록용
+    merge_log = []   # (날짜, 편명, 출발지, 설명) 기록용
 
     return_rows = d[d['From'] == d['To']].index.tolist()
 
@@ -102,20 +103,16 @@ def normalize_ramp_returns(df):
             continue  # 다음날 새 비행 등, 병합 대상 아님
 
         date_label = row['_atd_dt'].strftime("%m/%d")
-        if bl_h < RAMP_RETURN_SHORT_THRESHOLD_H:
-            # 이륙 전 회항 → 완전 삭제, 재출발편은 그대로 둠
-            drop_idx.add(i)
-            merge_log.append((date_label, flight, origin, f"이륙 전 회항({bl_h*60:.0f}분) 자동 삭제"))
-        else:
-            # 실제 램프리턴 → 병합 (ATD는 회항편, 나머지는 재출발편)
-            drop_idx.add(i)
-            drop_idx.add(j)
-            merged = nxt.copy()
-            merged['ATD'] = row['ATD']
-            if pd.notna(row['STD']):
-                merged['STD'] = row['STD']
-            replace_rows[j] = merged
-            merge_log.append((date_label, flight, origin, f"램프리턴({bl_h:.1f}h) 자동 병합"))
+
+        # 회항 시간 길이와 무관하게 항상 병합 (ATD는 회항편, 나머지는 재출발편)
+        drop_idx.add(i)
+        drop_idx.add(j)
+        merged = nxt.copy()
+        merged['ATD'] = row['ATD']
+        if pd.notna(row['STD']):
+            merged['STD'] = row['STD']
+        replace_rows[j] = merged
+        merge_log.append((date_label, flight, origin, f"램프리턴(회항 Bl {bl_h*60:.0f}분) 자동 병합 — 연장시간에 회항 경과시간 포함"))
 
     out_rows = []
     for idx, r in d.iterrows():
@@ -909,7 +906,7 @@ if all_uploaded:
             st.markdown("""
 | 항목 | 기준 |
 |------|------|
-| **램프리턴/회항 보정** | From==To(회항) 행 자동 감지: 짧으면(30분 미만) 삭제, 길면 재출발편과 병합(ATD는 회항편 기준) |
+| **램프리턴/회항 보정** | From==To(같은 편명 회항) 행 자동 감지 → 회항 소요시간과 무관하게 재출발편과 병합 (ATD는 회항편 최초 출발시각 기준 → 연장시간에 회항 경과시간 포함) |
 | **야간** | 운항 C/I~C/O(KST) 중 22:00~06:00 겹치는 시간 / C/I KST 기준 월 귀속 |
 | **연장** | ATD~ATA(KST) 8시간 초과분 / ATD KST 기준 월 귀속 / 같은 편명 분할행은 구간 시간 합산 |
 | **3P** | 편명 0151·0152 Bl Hrs / ATD KST 기준 월 귀속 |
