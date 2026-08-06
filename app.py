@@ -16,6 +16,120 @@ INSTR_DC   = {'LIP','LCP','DLCP','I','I*'}
 INSTR_EXCL = {'강용학','김문배','박충근','박형득','서세규'}
 
 # ═══════════════════════════════════════════
+# 램프리턴/불이착 자동 보정
+# ═══════════════════════════════════════════
+RAMP_RETURN_SHORT_THRESHOLD_H = 0.5   # 이보다 짧으면 '이륙 전 회항(RTG)'으로 보고 완전 삭제
+RAMP_RETURN_GAP_WINDOW_H      = 6.0   # 회항 도착~재출발 ATD 간격이 이보다 크면 별도 비행으로 보고 병합 안함
+
+def normalize_ramp_returns(df):
+    """
+    FltReport 원본에서 램프리턴/불이착(From==To, 짧은 회항)을 자동 감지해
+    운항정산 계산 전에 보정한다.
+
+    처리 규칙:
+      1) From==To 행(회항편)을 찾는다.
+      2) 같은 편명 · 같은 출발지에서 그 이후에 실제로 목적지가 다른(To!=From)
+         재출발 행을 찾는다 (회항 도착 후 RAMP_RETURN_GAP_WINDOW_H 시간 이내).
+      3) 회항편의 Bl Hrs(실제 비행시간)가 RAMP_RETURN_SHORT_THRESHOLD_H 미만이면
+         → '이륙 전 회항(RTG)'으로 보고 그 행을 통째로 삭제 (재출발편은 원본 그대로 사용)
+      4) 그 이상이면 → 실제 램프리턴(Air Turnback)으로 보고 두 행을 하나로 병합:
+         ATD는 회항편(최초 출발 시각), ATA·Bl Hrs·운항 C/I·운항 C/O·To는 재출발편 값 사용
+      5) 재출발편을 찾지 못하거나 간격이 너무 크면(다음날 등) 원본을 그대로 둔다
+         (예: SFO→SFO 램프리턴 후 다음날 새 편으로 출발한 케이스)
+
+    ※ 주의: 목적지가 아예 다른 공항으로 바뀌는 '진짜 다이버트'(예: 예정 도착지가 ICN인데
+    실제로는 다른 공항에 착륙한 뒤 별도의 이동편이 필요한 경우)는 원본 FltReport에
+    해당 이동편 데이터 자체가 없는 경우가 있어 자동 보정 대상에서 제외한다.
+    이런 경우는 여전히 수동 확인/보정이 필요하다.
+    """
+    d = df.copy().reset_index(drop=True)
+
+    date_dt = pd.to_datetime(d['Date'])
+
+    def to_dt(i, t):
+        if pd.isna(t):
+            return None
+        base = date_dt.iloc[i]
+        if isinstance(t, datetime.time):
+            return datetime.datetime.combine(base.date(), t)
+        return None
+
+    d['_atd_dt'] = [to_dt(i, d.at[i, 'ATD']) for i in d.index]
+    d['_ata_dt'] = [to_dt(i, d.at[i, 'ATA']) for i in d.index]
+    for i in d.index:
+        a, b = d.at[i, '_atd_dt'], d.at[i, '_ata_dt']
+        if a is not None and b is not None and b < a:
+            d.at[i, '_ata_dt'] = b + timedelta(days=1)
+
+    d['_flight_s'] = d['Flight'].astype(str)
+    d = d.sort_values('_atd_dt', kind='stable').reset_index(drop=True)
+
+    drop_idx = set()
+    replace_rows = {}
+    merge_log = []   # (편명, 날짜, 유형) 기록용
+
+    return_rows = d[d['From'] == d['To']].index.tolist()
+
+    for i in return_rows:
+        if i in drop_idx:
+            continue
+        row = d.loc[i]
+        flight = row['_flight_s']
+        origin = row['From']
+        bl_hrs = row['Bl Hrs']
+        bl_h = (bl_hrs.hour + bl_hrs.minute / 60 + bl_hrs.second / 3600) if isinstance(bl_hrs, datetime.time) else 0.0
+        if row['_atd_dt'] is None:
+            continue
+
+        candidates = d[
+            (d['_flight_s'] == flight) &
+            (d['From'] == origin) &
+            (d['To'] != origin) &
+            (d['_atd_dt'].notna()) &
+            (d['_atd_dt'] > row['_atd_dt'])
+        ].sort_values('_atd_dt')
+
+        if candidates.empty:
+            continue
+
+        nxt = candidates.iloc[0]
+        j = nxt.name
+        if row['_ata_dt'] is None or nxt['_atd_dt'] is None:
+            continue
+        gap_hours = (nxt['_atd_dt'] - row['_ata_dt']).total_seconds() / 3600
+
+        if gap_hours > RAMP_RETURN_GAP_WINDOW_H:
+            continue  # 다음날 새 비행 등, 병합 대상 아님
+
+        date_label = row['_atd_dt'].strftime("%m/%d")
+        if bl_h < RAMP_RETURN_SHORT_THRESHOLD_H:
+            # 이륙 전 회항 → 완전 삭제, 재출발편은 그대로 둠
+            drop_idx.add(i)
+            merge_log.append((date_label, flight, origin, f"이륙 전 회항({bl_h*60:.0f}분) 자동 삭제"))
+        else:
+            # 실제 램프리턴 → 병합 (ATD는 회항편, 나머지는 재출발편)
+            drop_idx.add(i)
+            drop_idx.add(j)
+            merged = nxt.copy()
+            merged['ATD'] = row['ATD']
+            if pd.notna(row['STD']):
+                merged['STD'] = row['STD']
+            replace_rows[j] = merged
+            merge_log.append((date_label, flight, origin, f"램프리턴({bl_h:.1f}h) 자동 병합"))
+
+    out_rows = []
+    for idx, r in d.iterrows():
+        if idx in replace_rows:
+            out_rows.append(replace_rows[idx])
+        elif idx in drop_idx:
+            continue
+        else:
+            out_rows.append(r)
+
+    result = pd.DataFrame(out_rows).drop(columns=['_atd_dt', '_ata_dt', '_flight_s']).reset_index(drop=True)
+    return result, merge_log
+
+# ═══════════════════════════════════════════
 # 공통 유틸
 # ═══════════════════════════════════════════
 def fmt_hhmm(h):
@@ -753,6 +867,16 @@ if all_uploaded:
         missing = required - set(flt_df.columns)
         if missing: st.error(f"FltReport 필수 열 없음: {missing}"); st.stop()
 
+        # ── 램프리턴/불이착 자동 보정 ──────────────────────────
+        flt_df, ramp_log = normalize_ramp_returns(flt_df)
+        if ramp_log:
+            with st.expander(f"🛬 램프리턴/회항 자동 보정 내역 ({len(ramp_log)}건)"):
+                for date_label, flight, origin, desc in ramp_log:
+                    st.write(f"**{date_label} 편명 {flight} ({origin})**: {desc}")
+                st.caption("※ 목적지 자체가 바뀌는 진짜 다이버트(대체공항 착륙 후 별도 이동편)는 "
+                           "원본 데이터에 이동편 기록이 없는 경우가 있어 자동 보정 대상에서 제외됩니다. "
+                           "이런 경우는 별도로 확인해주세요.")
+
         flt_df["date_parsed"] = pd.to_datetime(flt_df["Date"], format="%d%b%y")
         available = sorted(flt_df[flt_df["운항 Crew"].notna()]["date_parsed"].dt.to_period("M").unique(), reverse=True)
 
@@ -785,6 +909,7 @@ if all_uploaded:
             st.markdown("""
 | 항목 | 기준 |
 |------|------|
+| **램프리턴/회항 보정** | From==To(회항) 행 자동 감지: 짧으면(30분 미만) 삭제, 길면 재출발편과 병합(ATD는 회항편 기준) |
 | **야간** | 운항 C/I~C/O(KST) 중 22:00~06:00 겹치는 시간 / C/I KST 기준 월 귀속 |
 | **연장** | ATD~ATA(KST) 8시간 초과분 / ATD KST 기준 월 귀속 / 같은 편명 분할행은 구간 시간 합산 |
 | **3P** | 편명 0151·0152 Bl Hrs / ATD KST 기준 월 귀속 |
