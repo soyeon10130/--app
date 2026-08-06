@@ -236,14 +236,44 @@ AIRPORT_UTC = {
     'LAX': -8, 'EWR': -5, 'SFO': -8, 'IAD': -5, 'DAC': 6, 'HNL': -10,
 }
 
+DOMESTIC_REPOSITION = {'ICN', 'GMP'}  # 인천 커퓨(23:00~06:00) 회피용 김포 착륙 후 재배치 등 국내 구간
+
 def classify_route(from_val, to_val):
     for v in [from_val, to_val]:
         v = str(v).strip().upper()
-        if v == 'ICN': continue
+        if v in DOMESTIC_REPOSITION: continue
         if v in SET1_DEST:  return "1set"
         if v in SET2_DEST:  return "2set"
         if v in SET3P_DEST: return "3P"
     return None
+
+def build_flight_set_map(uploaded):
+    """
+    Roster 전체를 훑어서 '편명 → Set구분(1set/2set/3P)' 매핑을 만든다.
+    같은 편명은 항상 같은 노선을 운항하므로, GMP↔ICN 같은 국내 재배치 구간처럼
+    From/To만으로 노선을 판단할 수 없는 행에 대한 fallback으로 사용한다.
+    (예: 인천 커퓨로 김포 착륙 후 ICN으로 재배치하는 짧은 구간)
+    """
+    raw, name_indices = _get_crew_sections(uploaded)
+    votes = {}  # flight_no(str) -> {set_type: count}
+    for idx_i, name_idx in enumerate(name_indices[:-1]):
+        data = _parse_crew_data(raw, name_idx, name_indices[idx_i + 1])
+        if data is None:
+            continue
+        flights = data[data["Activity"].apply(is_actual_flight)]
+        for _, row in flights.iterrows():
+            from_val = str(row["From"]).strip() if not pd.isna(row["From"]) else ""
+            to_val   = str(row["To"]).strip()   if not pd.isna(row["To"])   else ""
+            set_type = classify_route(from_val, to_val)
+            if set_type is None:
+                continue
+            m = re.search(r'\d+', str(row["Activity"]))
+            if not m:
+                continue
+            flight_no = m.group()
+            votes.setdefault(flight_no, {}).setdefault(set_type, 0)
+            votes[flight_no][set_type] += 1
+    return {flt: max(counts, key=counts.get) for flt, counts in votes.items()}
 
 def local_to_kst(date_str, time_str, from_city):
     try:
@@ -349,10 +379,11 @@ def _parse_crew_data(raw, name_idx, next_idx):
     return data[(data.index >= first_valid) & (data["group_id"] > 0)]
 
 # ── 교관수당 전용 파싱 (기존 Roster — LIP/LCP/DLCP 포지션 추출) ─────────────
-def parse_roster_file(uploaded, target_month=None, target_year=None):
+def parse_roster_file(uploaded, target_month=None, target_year=None, flight_set_map=None):
     """교관 수당 파싱 전용"""
     raw, name_indices = _get_crew_sections(uploaded)
     detail_rows = []
+    flight_set_map = flight_set_map or {}
 
     for idx_i, name_idx in enumerate(name_indices[:-1]):
         crew_name = str(raw.iloc[name_idx, 0]).replace(":", "").strip()
@@ -389,6 +420,11 @@ def parse_roster_file(uploaded, target_month=None, target_year=None):
                 from_val = str(row["From"]).strip() if not pd.isna(row["From"]) else ""
                 to_val   = str(row["To"]).strip()   if not pd.isna(row["To"])   else ""
                 set_type = classify_route(from_val, to_val)
+                if set_type is None:
+                    # From/To가 둘 다 국내(예: 인천 커퓨로 인한 GMP↔ICN 재배치)라 판단 불가한 경우,
+                    # 같은 편명의 다른 정상 구간들로부터 만든 매핑으로 보정
+                    m = re.search(r'\d+', str(row["Activity"]))
+                    set_type = flight_set_map.get(m.group()) if m else None
                 if set_type is None: continue
 
                 kst_dt = local_to_kst(row["Date_ff"], row["Start_L"], from_val)
@@ -848,11 +884,11 @@ with c1:
 
 with c2:
     st.markdown("**📂 Roster.xlsx (교관수당용)**")
-    st.caption("PDC → Crew roster → Position(LIP·LCP·DLCP) → Period 설정 → Section(Schedule) → Time mode(UTC) → 추출")
+    st.caption("PDC → Crew roster → Position(LIP·LCP·DLCP) → Period 설정(⚠️ Time mode=UTC 기준이므로 전월 말일~익월 1일 하루씩 여유 있게, 예: 30Jun26~01Aug26) → Section(Schedule) → Time mode(UTC) → 추출")
     rost_file = st.file_uploader("Roster.xlsx (교관수당용)", type=["xlsx"], label_visibility="collapsed", key="up_rost")
 
     st.markdown("**📂 Roster.xlsx (전체 승무원)**")
-    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정 → Counter에 Pairing · duty code · working position · check in(local) · check out (local) · Activity · From · To · A/C HOTEL · Block · FDP TIME 선택 → 추출")
+    st.caption("PDC → Crew roster → Position(All in FD) → Period 설정(⚠️ Time mode=UTC 기준이므로 전월 말일~익월 1일 하루씩 여유 있게) → Counter에 Pairing · duty code · working position · check in(local) · check out (local) · Activity · From · To · A/C HOTEL · Block · FDP TIME 선택 → 추출")
     allcrew_file = st.file_uploader("Roster.xlsx (전체 승무원)", type=["xlsx"], label_visibility="collapsed", key="up_allcrew")
 
 all_uploaded = flt_file and dhc_file and ob_file and rost_file and allcrew_file
@@ -890,8 +926,9 @@ if all_uploaded:
 
         calc_df = calc_summary(base_df, ob_sum)
 
-        # 교관수당 Roster → 교관수당 파싱
-        instr_det_all = parse_roster_file(rost_file)
+        # 편명 → Set구분 매핑 (GMP 등 국내 재배치 구간 보정용) + 교관수당 Roster 파싱
+        flight_set_map = build_flight_set_map(rost_file)
+        instr_det_all = parse_roster_file(rost_file, flight_set_map=flight_set_map)
 
         n_instr    = instr_det_all["이름"].nunique() if not instr_det_all.empty else 0
         n_dh_pairs = len(dh_ob_exclude)
@@ -930,7 +967,7 @@ if all_uploaded:
         if st.button("🚀 정산 실행", type="primary", use_container_width=True):
             with st.spinner("계산 중..."):
                 flt_sum, flt_det = process_flt(flt_df, target_month, target_year, dh_ob_exclude)
-                instr_det = parse_roster_file(rost_file, target_month, target_year)
+                instr_det = parse_roster_file(rost_file, target_month, target_year, flight_set_map=flight_set_map)
 
             if flt_sum.empty:
                 st.warning("FltReport에서 해당 월 데이터가 없습니다.")
