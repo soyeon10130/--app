@@ -15,6 +15,17 @@ SET3P_DEST = {'HNL'}
 INSTR_DC   = {'LIP','LCP','DLCP','I','I*'}
 INSTR_EXCL = {'강용학','김문배','박충근','박형득','서세규'}
 
+def read_excel_safe(uploaded, **kwargs):
+    """
+    업로드된 파일(Streamlit UploadedFile)은 한 번 읽으면 커서가 끝까지 이동해서
+    같은 객체를 다시 읽으면 빈 데이터가 반환된다(예: 같은 Roster 파일을
+    build_flight_set_map + parse_roster_file 등 여러 함수에서 재사용하는 경우).
+    매번 읽기 전에 커서를 처음으로 되돌려서 이 문제를 방지한다.
+    """
+    if hasattr(uploaded, 'seek'):
+        uploaded.seek(0)
+    return pd.read_excel(uploaded, **kwargs)
+
 # ═══════════════════════════════════════════
 # 램프리턴/불이착 자동 보정
 # ═══════════════════════════════════════════
@@ -191,7 +202,7 @@ def style_hdr(ws, row, headers, bg="1F4E79", height=20):
 # 파일1: DHC / DAYOFF 파싱
 # ═══════════════════════════════════════════
 def parse_dhc_file(uploaded):
-    df = pd.read_excel(uploaded)
+    df = read_excel_safe(uploaded)
     data = df.iloc[4:].copy()
     data.columns = ["Crew Code","Position","Name","Counter","Mar26","Total"]
     data = data[data["Counter"] != "Counter"].copy()
@@ -212,7 +223,7 @@ def parse_obca_file(uploaded):
     8번째 행이 헤더). Position이 OBFO 또는 OBCA인 행의 Block Hours(timedelta)를
     승무원별로 합산하여 반환.
     """
-    df = pd.read_excel(uploaded)
+    df = read_excel_safe(uploaded)
     data = df.iloc[6:].copy()
     data.columns = ["Crew Code","AC Type","Position","Block Hours","Cruise Time","Sectors","Valid From","Valid To"]
     data = data[data["Crew Code"] != "Crew Code"].copy()
@@ -325,7 +336,7 @@ def is_actual_flight(activity):
 
 def _get_crew_sections(uploaded):
     """Roster 파일에서 승무원별 섹션 인덱스 반환"""
-    df = pd.read_excel(uploaded)
+    df = read_excel_safe(uploaded)
     raw = df.copy()
     name_indices = raw[raw.iloc[:,0].astype(str).str.match(r'^[가-힣]{2,5}:$', na=False)].index.tolist()
     name_indices.append(len(raw))
@@ -967,7 +978,7 @@ all_uploaded = flt_file and dhc_file and ob_file and rost_file and allcrew_file
 
 if all_uploaded:
     try:
-        flt_df = pd.read_excel(flt_file)
+        flt_df = read_excel_safe(flt_file)
         required = {"Date","Flight","ATD","ATA","Bl Hrs","운항 C/I","운항 C/O","운항 Crew"}
         missing = required - set(flt_df.columns)
         if missing: st.error(f"FltReport 필수 열 없음: {missing}"); st.stop()
