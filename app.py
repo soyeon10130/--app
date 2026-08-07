@@ -25,18 +25,19 @@ def normalize_ramp_returns(df):
     FltReport 원본에서 램프리턴/불이착(From==To 회항편)을 자동 감지해
     운항정산 계산 전에 보정한다.
 
-    처리 규칙 (연장시간 = ATD~ATA 전체 경과시간 기준, 같은 편명 램프리턴에만 적용):
+    처리 규칙 (연장시간 = 인/아웃바운드 블락타임(Bl Hrs) 합산 기준, 같은 편명 램프리턴에만 적용):
       1) From==To 행(회항편)을 찾는다.
       2) 같은 편명 · 같은 출발지에서 그 이후에 실제로 목적지가 다른(To!=From)
          재출발 행을 찾는다 (회항 도착 후 RAMP_RETURN_GAP_WINDOW_H 시간 이내).
       3) 회항 시간 길이와 상관없이(이륙 전 회항이든 실제 공중 회항이든) 두 행을 하나로 병합:
-         ATD는 회항편의 최초 출발 시각, ATA·Bl Hrs·운항 C/I·운항 C/O·To는 재출발편 값을 사용.
-         → 연장시간(ATD~ATA 경과시간) 계산 시 회항에 걸린 시간까지 전부 포함됨.
+         ATD/STD는 회항편의 최초 출발 시각(월 귀속 판단용), ATA·운항 C/I·운항 C/O·To는 재출발편 값을 사용,
+         Bl Hrs는 회항편+재출발편 두 구간의 블락타임 합산값으로 대체.
+         → 연장시간은 이 합산 Bl Hrs 기준(8시간 초과분)으로 계산됨(process_flt에서 '_ramp_merged' 표시로 처리).
       4) 재출발편을 찾지 못하거나 간격이 너무 크면(다음날 새 비행 등) 원본을 그대로 둔다
          (예: SFO→SFO 램프리턴 후 다음날 새 편으로 출발한 케이스는 별도 duty로 보고 병합하지 않음)
 
-    ※ 편명이 다른 당일 왕복(예: NRT 731 나가고 732 들어오는 경우)은 이 병합 대상이 아니며,
-    기존 방식대로 각 편명별로 개별 계산된다.
+    ※ 편명이 다른 당일 왕복(예: NRT 731 나가고 732 들어오는 경우, DAC 등)은 이 함수의 병합 대상이 아니며,
+    process_flt에서 별도로 '당일 퀵턴 인/아웃바운드 블락타임 합산' 로직으로 처리된다.
 
     ※ 주의: 목적지가 아예 다른 공항으로 바뀌는 '진짜 다이버트'(예: 예정 도착지가 ICN인데
     실제로는 다른 공항에 착륙한 뒤 별도의 이동편이 필요한 경우)는 원본 FltReport에
@@ -104,15 +105,28 @@ def normalize_ramp_returns(df):
 
         date_label = row['_atd_dt'].strftime("%m/%d")
 
-        # 회항 시간 길이와 무관하게 항상 병합 (ATD는 회항편, 나머지는 재출발편)
+        # 연장시간 산정 기준: 회항 소요시간과 무관하게 항상 병합하되,
+        # 연장시간은 인/아웃바운드 '블락타임(Bl Hrs) 합산' 기준으로 산정해야 하므로
+        # 병합된 행의 Bl Hrs를 두 구간의 합으로 만들고, process_flt가 이 값을 쓰도록 표시해둔다.
         drop_idx.add(i)
         drop_idx.add(j)
         merged = nxt.copy()
         merged['ATD'] = row['ATD']
         if pd.notna(row['STD']):
             merged['STD'] = row['STD']
+
+        return_bl = row['Bl Hrs']
+        redep_bl = nxt['Bl Hrs']
+        return_h = (return_bl.hour + return_bl.minute/60 + return_bl.second/3600) if isinstance(return_bl, datetime.time) else 0.0
+        redep_h  = (redep_bl.hour + redep_bl.minute/60 + redep_bl.second/3600) if isinstance(redep_bl, datetime.time) else 0.0
+        total_h  = return_h + redep_h
+        th = int(total_h); tm = round((total_h - th) * 60)
+        if tm == 60: th += 1; tm = 0
+        merged['Bl Hrs'] = datetime.time(th % 24, tm, 0)
+        merged['_ramp_merged'] = True
+
         replace_rows[j] = merged
-        merge_log.append((date_label, flight, origin, f"램프리턴(회항 Bl {bl_h*60:.0f}분) 자동 병합 — 연장시간에 회항 경과시간 포함"))
+        merge_log.append((date_label, flight, origin, f"램프리턴(회항 Bl {bl_h:.2f}h) 자동 병합 — 연장시간은 인/아웃바운드 블락타임 합산({total_h:.2f}h) 기준"))
 
     out_rows = []
     for idx, r in d.iterrows():
@@ -124,6 +138,9 @@ def normalize_ramp_returns(df):
             out_rows.append(r)
 
     result = pd.DataFrame(out_rows).drop(columns=['_atd_dt', '_ata_dt', '_flight_s']).reset_index(drop=True)
+    if '_ramp_merged' not in result.columns:
+        result['_ramp_merged'] = False
+    result['_ramp_merged'] = result['_ramp_merged'].fillna(False)
     return result, merge_log
 
 # ═══════════════════════════════════════════
@@ -603,7 +620,10 @@ def process_flt(df, target_month, target_year, dh_ob_exclude=None):
 
         bl    = blhrs_decimal(row["Bl Hrs"])
         night = calc_night(ci_kst, co_kst) if night_in_month else 0.0
+        from_v = str(row['From']).strip().upper() if not pd.isna(row['From']) else ""
+        to_v   = str(row['To']).strip().upper()   if not pd.isna(row['To'])   else ""
         route = f"{row['From']}→{row['To']}"
+        is_ramp_merged = bool(row.get('_ramp_merged', False)) if hasattr(row, 'get') else False
 
         key = (date_str, flight, str(crew_str).strip())
         if key not in grouped:
@@ -618,11 +638,16 @@ def process_flt(df, target_month, target_year, dh_ob_exclude=None):
                 "co_kst": co_kst,
                 "atd_in_month": atd_in_month,
                 "seg_hours": 0.0,
+                "bl_total": 0.0,
                 "night": 0.0,
                 "p3_bl": 0.0,
+                "is_ramp_merged": False,
+                "origin": from_v,
+                "dest": to_v,
             }
         g = grouped[key]
         g["routes"].append(route)
+        g["dest"] = to_v  # 마지막 구간의 도착지로 갱신
         if atd_kst and (not g["atd_kst"] or atd_kst < g["atd_kst"]):
             g["atd_kst"] = atd_kst
         if ata_kst and (not g["ata_kst"] or ata_kst > g["ata_kst"]):
@@ -633,17 +658,64 @@ def process_flt(df, target_month, target_year, dh_ob_exclude=None):
             g["co_kst"] = co_kst
         if atd_in_month:
             g["seg_hours"] += elapsed_hours(atd_kst, ata_kst)
+            g["bl_total"] += bl
             if flight in ["0151", "0152"]:
                 g["p3_bl"] += bl
+        if is_ramp_merged:
+            g["is_ramp_merged"] = True
         g["night"] += night
+
+    # ── 연장시간 기본값 산정 ──────────────────────────────────────────
+    # 일반 비행: ATD~ATA 경과시간 - 8h
+    # 램프리턴 병합편: 인/아웃바운드 블락타임 합산 - 8h (normalize_ramp_returns가 Bl Hrs에 이미 합산해둠)
+    for g in grouped.values():
+        if g["is_ramp_merged"]:
+            g["ot"] = max(0.0, g["bl_total"] - 8) if g["atd_in_month"] else 0.0
+        else:
+            g["ot"] = max(0.0, g["seg_hours"] - 8) if g["atd_in_month"] else 0.0
+
+    # ── 당일 퀵턴(편명이 다른 왕복, 예: DAC/NRT 등) 인/아웃바운드 블락타임 합산 ──
+    # 같은 승무원 조합이 같은 KST 날짜에 ICN→X, X→ICN 형태로 왕복하면
+    # 각 편명별 블락타임을 합산해 8시간 초과 여부를 새로 산정하고, 복귀편에 몰아서 반영한다.
+    by_crew = {}
+    for key, g in grouped.items():
+        if not g["atd_in_month"] or g["is_ramp_merged"]:
+            continue
+        crew_set = frozenset(n for n in g["crew_str"].split() if n)
+        if not crew_set:
+            continue
+        by_crew.setdefault(crew_set, []).append(g)
+
+    for crew_set, glist in by_crew.items():
+        glist.sort(key=lambda x: x["atd_kst"])
+        used = set()
+        for i, g_out in enumerate(glist):
+            if id(g_out) in used: continue
+            if g_out["origin"] != "ICN" or g_out["dest"] == "ICN" or not g_out["dest"]:
+                continue
+            for g_ret in glist[i+1:]:
+                if id(g_ret) in used: continue
+                if g_ret["atd_kst"].date() != g_out["atd_kst"].date():
+                    continue
+                if g_ret["origin"] == g_out["dest"] and g_ret["dest"] == "ICN":
+                    bl_sum = g_out["bl_total"] + g_ret["bl_total"]
+                    ot_combined = max(0.0, bl_sum - 8)
+                    g_out["ot"] = 0.0
+                    g_ret["ot"] = ot_combined
+                    used.add(id(g_out)); used.add(id(g_ret))
+                    break
+
+    # ── 야간시간 안전장치: 22~06시(8h) 특성상 1건당 8시간을 초과할 수 없음(규정) ──
+    for g in grouped.values():
+        if g["night"] > 8.0:
+            g["night"] = 8.0
 
     for g in grouped.values():
         flight       = g["flight"]
         date_str     = g["date_str"]
-        atd_in_month = g["atd_in_month"]
         night        = g["night"]
-        ot           = max(0.0, g["seg_hours"] - 8) if atd_in_month else 0.0
-        p3           = g["p3_bl"] if atd_in_month else 0.0
+        ot           = g["ot"]
+        p3           = g["p3_bl"] if g["atd_in_month"] else 0.0
 
         if night == 0 and ot == 0 and p3 == 0:
             continue
