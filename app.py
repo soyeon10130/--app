@@ -813,9 +813,11 @@ def process_flt(df, target_month, target_year, dh_ob_exclude=None):
             g["is_ramp_merged"] = True
         g["night"] += night
 
-    # ── 3P 자동 판정 ───────────────────────────────────────────────
-    # 규칙: 1set(단거리) 노선인데 실제 운항 크루(DH 제외)가 3명 이상 → 3P.
-    #        또는 노선 자체가 3P(HNL). 3P시간 = 해당 편 Bl Hrs.
+    # ── 3P 판정 ────────────────────────────────────────────────────
+    # 3P 대상 편명: 151·152(HNL, 상시 3P) 및 801·802(HKG, 3인 운항 시 3P).
+    # 해당 편명에서 실제 운항 크루(DH 제외)가 3명 이상일 때만 3P로 처리.
+    # 3P시간 = 해당 편 Bl Hrs.
+    P3_FLIGHTS = {"0151", "0152", "0801", "0802"}
     for g in grouped.values():
         if not g["atd_in_month"]:
             continue
@@ -823,11 +825,7 @@ def process_flt(df, target_month, target_year, dh_ob_exclude=None):
         excluded = (dh_ob_exclude or {}).get(dh_key, set())
         real_crew = [n for n in g["crew_names"] if n not in excluded]
         n_real = len(real_crew)
-        is_3p = False
-        if g["route_type"] == "3P":
-            is_3p = True
-        elif g["route_type"] == "1set" and n_real >= 3:
-            is_3p = True
+        is_3p = (g["flight"] in P3_FLIGHTS and n_real >= 3)
         g["p3_bl"] = g["bl_total"] if is_3p else 0.0
 
     # ── 연장시간 기본값 산정 ──────────────────────────────────────────
