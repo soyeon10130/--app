@@ -717,7 +717,51 @@ def route_type_of(origin, dest):
         if v in SET3P_DEST: return "3P"
     return None
 
-def process_flt(df, target_month, target_year, dh_ob_exclude=None):
+def list_801_3crew_candidates(df, target_month, target_year, dh_ob_exclude=None):
+    """
+    해당 월의 801/802편 중 실제 운항 크루(DH 제외) 3명 이상인 편을 후보로 반환.
+    반환: [(mmdd, flight, [크루...]), ...]  (ATD KST 날짜 기준)
+    UI에서 이 후보를 보여주고 사용자가 3P 대상만 선택하도록 한다.
+    """
+    out = []
+    seen = set()
+    for _, row in df.iterrows():
+        if pd.isna(row["운항 Crew"]):
+            continue
+        flight = normalize_flight(row["Flight"])
+        if flight not in ("0801", "0802"):
+            continue
+        raw_date = row["Date"]
+        if isinstance(raw_date, (datetime.datetime, pd.Timestamp)):
+            date_str = raw_date.strftime("%d%b%y").upper()
+        else:
+            date_str = str(raw_date).strip().upper()
+        atd = combine_dt(date_str, row["ATD"])
+        if not atd:
+            continue
+        atd_kst = atd + KST_OFFSET
+        if atd_kst.month != target_month or atd_kst.year != target_year:
+            continue
+        crew = [c for c in str(row["운항 Crew"]).split() if c and c != "nan"]
+        dh_key = (date_str, flight.lstrip("0") or "0")
+        excluded = (dh_ob_exclude or {}).get(dh_key, set())
+        real = [c for c in crew if c not in excluded]
+        if len(real) < 3:
+            continue
+        mmdd = atd_kst.strftime("%m/%d")
+        key = (mmdd, flight)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((mmdd, flight, real))
+    out.sort()
+    return out
+
+
+def process_flt(df, target_month, target_year, dh_ob_exclude=None, p3_801_dates=None):
+    # p3_801_dates: 801/802편을 3P로 처리할 '출발 KST 날짜' 문자열 집합 (예: {"07/03","07/26","07/29"}).
+    #   151/152편은 상시 자동 3P, 801/802편은 이 목록에 지정된 날짜에만 3P로 계산.
+    p3_801_dates = set(p3_801_dates or [])
     sum_rows, det_rows = [], []
     grouped = {}
 
@@ -814,10 +858,12 @@ def process_flt(df, target_month, target_year, dh_ob_exclude=None):
         g["night"] += night
 
     # ── 3P 판정 ────────────────────────────────────────────────────
-    # 3P 대상 편명: 151·152(HNL, 상시 3P) 및 801·802(HKG, 3인 운항 시 3P).
-    # 해당 편명에서 실제 운항 크루(DH 제외)가 3명 이상일 때만 3P로 처리.
+    # 151·152편(HNL): 3인 운항 시 상시 자동 3P.
+    # 801·802편(HKG): 자동 구별이 불가능하므로(3인 편성이 상시 발생) 사용자가
+    #                 지정한 날짜(p3_801_dates)에 한해서만 3P로 계산.
     # 3P시간 = 해당 편 Bl Hrs.
-    P3_FLIGHTS = {"0151", "0152", "0801", "0802"}
+    P3_AUTO_FLIGHTS = {"0151", "0152"}
+    P3_DESIG_FLIGHTS = {"0801", "0802"}
     for g in grouped.values():
         if not g["atd_in_month"]:
             continue
@@ -825,7 +871,12 @@ def process_flt(df, target_month, target_year, dh_ob_exclude=None):
         excluded = (dh_ob_exclude or {}).get(dh_key, set())
         real_crew = [n for n in g["crew_names"] if n not in excluded]
         n_real = len(real_crew)
-        is_3p = (g["flight"] in P3_FLIGHTS and n_real >= 3)
+        atd_mmdd = g["atd_kst"].strftime("%m/%d")
+        is_3p = False
+        if g["flight"] in P3_AUTO_FLIGHTS and n_real >= 3:
+            is_3p = True
+        elif g["flight"] in P3_DESIG_FLIGHTS and n_real >= 3 and atd_mmdd in p3_801_dates:
+            is_3p = True
         g["p3_bl"] = g["bl_total"] if is_3p else 0.0
 
     # ── 연장시간 기본값 산정 ──────────────────────────────────────────
@@ -1162,6 +1213,30 @@ if all_uploaded:
         selected_str = st.selectbox("📅 정산할 월 선택", [str(p) for p in available])
         sel = pd.Period(selected_str, freq="M"); target_year, target_month = sel.year, sel.month
 
+        # ── 801/802편 3P 지정 (151/152는 자동, 801/802는 아래에서 선택한 날짜만 3P) ──
+        cand_801 = list_801_3crew_candidates(flt_df, target_month, target_year, dh_ob_exclude)
+        p3_801_dates = set()
+        st.markdown("**🛫 801/802편 3P 지정** — 아래는 해당 월 801/802편 중 3인 편성 편입니다. 실제 3P(3인 운항 수당) 대상 날짜만 체크하세요. (151/152편은 자동 3P 처리)")
+        if cand_801:
+            # 날짜별로 묶어서 표시 (801/802 왕복이 같은 날짜면 한 줄)
+            by_date = {}
+            for mmdd, flight, real in cand_801:
+                by_date.setdefault(mmdd, []).append((flight, real))
+            options = []
+            label_to_date = {}
+            for mmdd in sorted(by_date):
+                names = sorted({n for _, real in by_date[mmdd] for n in real})
+                flts = "·".join(sorted({f.lstrip('0') for f, _ in by_date[mmdd]}))
+                label = f"{mmdd}  (편명 {flts} / {', '.join(names)})"
+                options.append(label)
+                label_to_date[label] = mmdd
+            chosen = st.multiselect("3P 대상 날짜 선택", options, key="p3_801_sel")
+            p3_801_dates = {label_to_date[c] for c in chosen}
+            if p3_801_dates:
+                st.caption(f"✅ 801/802 3P 지정: {', '.join(sorted(p3_801_dates))}")
+        else:
+            st.caption("해당 월에 801/802편 3인 편성 후보가 없습니다.")
+
         with st.expander("ℹ️ 계산 기준 보기"):
             st.markdown("""
 | 항목 | 기준 |
@@ -1170,7 +1245,7 @@ if all_uploaded:
 | **국내 재배치 병합** | SFO→GMP(커퓨)→GMP→ICN처럼 같은 편명·크루가 국내공항 경유 시 병합 → 연장 블락 합산, 월 귀속은 최종 도착 기준 |
 | **야간** | 운항 C/I~C/O(KST) 중 22:00~06:00 겹치는 시간 / C/I KST 기준 월 귀속 |
 | **연장** | ATD~ATA(KST) 8시간 초과분 / ATD KST 기준 월 귀속 / 같은 편명 분할행은 구간 시간 합산 |
-| **3P (자동)** | 1set 노선(단거리)인데 실제 운항 크루(DH 제외) 3명 이상 → 3P / HNL은 상시 3P / 3P시간 = 해당 편 Bl Hrs |
+| **3P** | 151·152편(HNL): 3인 운항 시 자동 3P / 801·802편(HKG): 위에서 지정한 날짜만 3P / 3P시간 = 해당 편 Bl Hrs |
 | **OAL** | 편명에 OAL 포함된 행 제외 |
 | **DH 제외** | 전체 Roster DC='DH' 자동 감지 → 연장·야간·3P 제외 (날짜 대소문자 일치) |
 | **OBCA/OBFO 제외/차감** | 전체 Roster working position(있을 때) + 별도 OBCA.xlsx 합산 → 총비행시간 차감 |
@@ -1187,7 +1262,7 @@ if all_uploaded:
 
         if st.button("🚀 정산 실행", type="primary", use_container_width=True):
             with st.spinner("계산 중..."):
-                flt_sum, flt_det = process_flt(flt_df, target_month, target_year, dh_ob_exclude)
+                flt_sum, flt_det = process_flt(flt_df, target_month, target_year, dh_ob_exclude, p3_801_dates)
                 instr_det = parse_roster_file(rost_file, target_month, target_year, flight_set_map=flight_set_map)
 
             if flt_sum.empty:
